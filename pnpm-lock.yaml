@@ -16012,7 +16012,7 @@ snapshots:
       '@npmcli/name-from-folder': 5.0.0
       '@npmcli/package-json': 8.0.1
       glob: 14.0.6
-      minimatch: 11.0.8
+      minimatch: 11.0.9
 
   '@npmcli/metavuln-calculator@10.0.0(supports-color@8.1.1)':
     dependencies:
@@ -21212,7 +21212,7 @@ snapshots:
 
   ignore-walk@9.0.1:
     dependencies:
-      minimatch: 11.0.8
+      minimatch: 11.0.9
 
   ignore@5.3.2: {}
 
