@@ -1,0 +1,17 @@
+name: safqa-ci
+on:
+  push: { paths: ['safqa/**', '.github/workflows/safqa-*.yml'] }
+  pull_request: { paths: ['safqa/**'] }
+  workflow_dispatch:
+permissions: { contents: read }
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: safqa } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: safqa/package-lock.json }
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
