@@ -1,0 +1,23 @@
+# Weekly: if upstream Crawlee (apify/crawlee master) has new commits, open (or keep) a PR into our `safqa` branch.
+# Nothing is merged automatically: a human reviews the PR, and safqa-ci runs on it.
+name: safqa-upstream-sync
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+permissions: { contents: read, pull-requests: write }
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: open sync PR when upstream moved
+        env: { GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}', REPO: '${{ github.repository }}' }
+        run: |
+          AHEAD=$(gh api "repos/$REPO/compare/safqa...apify:master" --jq .ahead_by)
+          echo "upstream commits not in safqa: $AHEAD"
+          [ "$AHEAD" = "0" ] && exit 0
+          OPEN=$(gh pr list -R "$REPO" --base safqa --state open --json headRefName,title --jq '[.[] | select(.title | startswith("chore: sync upstream Crawlee"))] | length')
+          [ "$OPEN" != "0" ] && { echo "sync PR already open"; exit 0; }
+          gh pr create -R "$REPO" --base safqa --head apify:master \
+            --title "chore: sync upstream Crawlee ($AHEAD commits)" \
+            --body "Automated weekly sync from apify/crawlee master. Review the upstream changelog, check safqa-ci, then merge. Our code lives in \`safqa/\` and \`.github/workflows/safqa-*.yml\`, so conflicts are rare."

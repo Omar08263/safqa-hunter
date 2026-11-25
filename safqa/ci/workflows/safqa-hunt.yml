@@ -1,0 +1,43 @@
+# Safqa's daily polite crawl. Free on public repos. Runs after D1's daily write reset (00:00 UTC = 02:00 Cairo),
+# asks the Safqa API for today's write budget first, and stops the moment the budget or a store says stop.
+name: safqa-hunt
+on:
+  schedule:
+    - cron: '40 0 * * *'   # 02:40 Cairo
+  workflow_dispatch:
+    inputs:
+      stores: { description: 'comma-separated store ids (default: all sitemap stores)', required: false, default: '' }
+      max: { description: 'max pages per store (default: per-store)', required: false, default: '' }
+      dry: { description: 'dry run (no writes; output as artifact)', type: boolean, default: false }
+concurrency: { group: safqa-hunt, cancel-in-progress: false }
+permissions: { contents: read }
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    defaults: { run: { working-directory: safqa } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: safqa/package-lock.json }
+      - run: npm ci
+      - uses: actions/cache/restore@v4
+        with: { path: safqa/state, key: 'safqa-state-${{ github.run_id }}', restore-keys: 'safqa-state-' }
+      - name: hunt
+        env:
+          SAFQA_HUNTER_TOKEN: ${{ secrets.SAFQA_HUNTER_TOKEN }}
+          STORES: ${{ inputs.stores }}
+          MAX: ${{ inputs.max }}
+          DRY: ${{ inputs.dry }}
+        run: |
+          ARGS=""
+          [ -n "$STORES" ] && ARGS="$ARGS --stores $STORES"
+          [ -n "$MAX" ] && ARGS="$ARGS --max $MAX"
+          [ "$DRY" = "true" ] && ARGS="$ARGS --dry"
+          npx tsx src/cli.ts hunt $ARGS
+      - uses: actions/cache/save@v4
+        if: always()
+        with: { path: safqa/state, key: 'safqa-state-${{ github.run_id }}' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'hunt-${{ github.run_id }}', path: 'safqa/out/', retention-days: 7, if-no-files-found: ignore }

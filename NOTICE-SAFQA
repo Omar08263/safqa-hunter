@@ -1,0 +1,6 @@
+safqa-hunter
+Copyright 2026 Safqa contributors (files under safqa/ and .github/workflows/safqa-*.yml)
+
+This product is a fork of Crawlee (https://github.com/apify/crawlee),
+Copyright Apify Technologies s.r.o., licensed under the Apache License, Version 2.0 (see LICENSE.md).
+Upstream files are unmodified. safqa/src/safqa-core.ts is copied from github.com/Omar08263/safqa.
