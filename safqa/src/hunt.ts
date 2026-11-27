@@ -74,12 +74,18 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
     const cached = st.sitemapCache[sm];
     const fresh: { loc: string; lastmod?: string; alternates: Record<string, string> }[] = [];
     let notModified = false;
-    try {
-      for await (const e of streamSitemap(sm, { etag: cached?.etag ?? st.etags[sm] })) {
+    const collect = async (etag?: string) => {
+      for await (const e of streamSitemap(sm, { etag })) {
         if ('etag' in e && !('loc' in e)) { if (e.etag) st.etags[sm] = e.etag; continue; }
         if ('notModified' in e) { notModified = true; continue; }
         fresh.push(e as { loc: string; lastmod?: string; alternates: Record<string, string> });
       }
+    };
+    try {
+      // Only send the ETag when we hold the entry list to replay on a 304; a bare ETag
+      // (state written before the cache existed) would turn a 304 into an empty store.
+      await collect(cached?.entries?.length ? cached.etag : undefined);
+      if (notModified && !cached?.entries?.length) { notModified = false; await collect(undefined); }
     } catch (err) { log.warning(`${s.id}: ${String(err)}`); }
     if (!notModified && fresh.length) st.sitemapCache[sm] = { etag: st.etags[sm], entries: fresh };
     const entries = notModified && cached ? cached.entries : fresh.length ? fresh : (cached?.entries ?? []);
