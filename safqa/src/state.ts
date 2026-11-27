@@ -3,7 +3,16 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-export interface UrlState { first: number; last?: number; hash?: string; fails?: number; etag?: string; lastModified?: string }
+export interface UrlState {
+  first: number; last?: number; hash?: string; fails?: number; etag?: string; lastModified?: string;
+  /** When this URL's item was last SENT to the API (drives the unchanged-refresh window). */
+  sentAt?: number;
+  /** How many times the sent fingerprint actually changed (drives A/B/C/D scheduling tiers). */
+  changes?: number;
+  /** Outcome of the last scrape attempt, kept separate from `hash` so a failure never
+   *  overwrites the last known-good fingerprint. */
+  scrapeStatus?: 'ok' | 'failed' | 'unchanged';
+}
 export interface SitemapCacheEntry { etag?: string; entries: { loc: string; lastmod?: string; alternates: Record<string, string> }[] }
 export interface State { urls: Record<string, Record<string, UrlState>>; etags: Record<string, string>; refusedUntil: Record<string, number>; refusals: Record<string, number>; sitemapCache: Record<string, SitemapCacheEntry> }
 const FILE = process.env.SAFQA_STATE ?? 'state/state.json';

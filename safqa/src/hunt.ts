@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { BasicCrawler, Configuration, log } from 'crawlee';
-import { cooldownMs, REFUSAL_STATUSES, THROTTLE_STATUSES } from './config.ts';
+import { cooldownMs, HEAL_CAP, MIN_ROOM, REFUSAL_STATUSES, THROTTLE_STATUSES, TIGHT_ROOM, UNCHANGED_WINDOW_MS } from './config.ts';
 import { browserFetch, closeBrowser } from './browser.ts';
 import { shopify, woocommerce } from './adapters/feeds.ts';
 import { streamSitemap } from './adapters/sitemap.ts';
@@ -26,7 +26,7 @@ const itemHash = (it: Item) => createHash('sha1').update([it.title, it.price, it
 
 export interface StoreRun { store: string; status: string; candidates: number; queued: number; fetched: number; extracted: number; healed: number; unchanged: number; anomalies?: number; sink?: Sink['stats']; groups?: number; ms: number; note?: string }
 
-export async function huntStore(s: Store, st: State, o: { max?: number; dry: boolean }): Promise<StoreRun> {
+export async function huntStore(s: Store, st: State, o: { max?: number; dry: boolean; tight?: boolean }): Promise<StoreRun> {
   const t0 = Date.now();
   const run: StoreRun = { store: s.id, status: 'ok', candidates: 0, queued: 0, fetched: 0, extracted: 0, healed: 0, unchanged: 0, ms: 0 };
   const done = (status: string, note?: string) => ({ ...run, status, note, ms: Date.now() - t0 });
@@ -45,7 +45,8 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
     run.extracted++;
     const prev = seen[it.url];
     if (!plausibleEgp(it.price)) { // NaN/0/placeholder/absurd price: never sent; back the URL off like a failure
-      seen[it.url] = { ...(prev ?? { first: Date.now() }), last: Date.now(), fails: (prev?.fails ?? 0) + 1 };
+      // scrapeStatus records the failure WITHOUT touching hash/sentAt: the last known-good value stays authoritative.
+      seen[it.url] = { ...(prev ?? { first: Date.now() }), last: Date.now(), fails: (prev?.fails ?? 0) + 1, scrapeStatus: 'failed' };
       return true;
     }
     const key = matchKey({ title: it.title, brand: it.brand, gtin: it.gtin, mpn: it.mpn });
@@ -53,9 +54,12 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
     if (it.price) priced.push({ key, price: it.price });
     const h = itemHash(it);
     const keepValidators = { ...(validators?.etag ? { etag: validators.etag } : {}), ...(validators?.lastModified ? { lastModified: validators.lastModified } : {}) };
-    if (prev?.hash === h && prev.last && Date.now() - prev.last < 72 * H) { seen[it.url] = { ...prev, last: Date.now(), ...keepValidators }; run.unchanged++; return true; } // unchanged: costs no writes
+    // Delta-only, strictly: an item whose fingerprint did not change is re-sent only when the refresh
+    // window since its last SEND has elapsed (legacy rows without sentAt fall back to last fetch).
+    const lastSent = prev?.sentAt ?? prev?.last;
+    if (prev?.hash === h && lastSent && Date.now() - lastSent < UNCHANGED_WINDOW_MS) { seen[it.url] = { ...prev, last: Date.now(), scrapeStatus: 'unchanged', ...keepValidators }; run.unchanged++; return true; } // unchanged: costs no writes
     const ok = await sink.add(it);
-    seen[it.url] = { ...(prev ?? { first: Date.now() }), last: Date.now(), hash: h, fails: 0, ...keepValidators };
+    seen[it.url] = { ...(prev ?? { first: Date.now() }), last: Date.now(), hash: h, fails: 0, sentAt: Date.now(), changes: (prev?.changes ?? 0) + (prev?.hash && prev.hash !== h ? 1 : 0), scrapeStatus: 'ok', ...keepValidators };
     return ok;
   };
 
@@ -109,7 +113,7 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
   if (!urls.length && s.sitemaps?.length && robots.sitemaps.length) await collectSitemaps(robots.sitemaps);
   run.candidates = urls.length;
   const max = Math.min(o.max ?? s.maxPages, s.maxPages);
-  const queue = prioritise([...new Set(urls)], seen, await getPlan(s.id), max, Date.now(), lastmods);
+  const queue = prioritise([...new Set(urls)], seen, o.tight ? [] : await getPlan(s.id), max, Date.now(), lastmods); // tight budget: skip the plan read
   run.queued = queue.length;
   if (!queue.length) return done(urls.length ? 'idle' : 'no-urls');
 
@@ -130,7 +134,7 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
       if (prev?.lastModified) cond['if-modified-since'] = prev.lastModified;
       const r = await politeFetch(request.url, { headers: cond });
       run.fetched++;
-      if (r.status === 304) { seen[request.url] = { ...(prev ?? { first: Date.now() }), last: Date.now(), fails: 0 }; run.unchanged++; return; } // unchanged: no body, no parse, no writes
+      if (r.status === 304) { seen[request.url] = { ...(prev ?? { first: Date.now() }), last: Date.now(), fails: 0, scrapeStatus: 'unchanged' }; run.unchanged++; return; } // unchanged: no body, no parse, no writes
       if (REFUSAL_STATUSES.has(r.status)) { refused = `HTTP ${r.status}`; await crawler.autoscaledPool?.abort(); return; }
       if (THROTTLE_STATUSES.has(r.status)) { refused = `HTTP ${r.status}`; refusedMs = Math.min(parseRetryAfter(r.headers) ?? cooldownMs((st.refusals[s.id] ?? 0) + 1), 24 * H); await crawler.autoscaledPool?.abort(); return; }
       if (r.status !== 200) { const p = seen[request.url]; seen[request.url] = { ...(p ?? { first: Date.now() }), last: Date.now(), fails: (p?.fails ?? 0) + 1 }; return; }
@@ -147,8 +151,9 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
         if (rendered && !looksLikeChallenge(rendered)) ({ item, candidates, pageTitle } = extract(rendered, request.url));
       }
       let it = item;
-      if (it && !it.price && candidates.length) { const ai = await heal(new URL(request.url).host, it.title, candidates); if (ai?.price && plausibleEgp(ai.price)) { it = { ...it, price: ai.price }; run.healed++; } }
-      if (!it && candidates.length && pageTitle) { const ai = await heal(new URL(request.url).host, pageTitle, candidates); if (ai?.price && plausibleEgp(ai.price)) { it = { url: request.url, title: pageTitle, brand: null, price: ai.price, listPrice: null, currency: 'EGP', inStock: true, image: null, gtin: null, mpn: null, crumbs: [] }; run.healed++; } }
+      // Self-heal is capped per store run (each call costs a Worker request + potential writes).
+      if (it && !it.price && candidates.length && run.healed < HEAL_CAP) { const ai = await heal(new URL(request.url).host, it.title, candidates); if (ai?.price && plausibleEgp(ai.price)) { it = { ...it, price: ai.price }; run.healed++; } }
+      if (!it && candidates.length && pageTitle && run.healed < HEAL_CAP) { const ai = await heal(new URL(request.url).host, pageTitle, candidates); if (ai?.price && plausibleEgp(ai.price)) { it = { url: request.url, title: pageTitle, brand: null, price: ai.price, listPrice: null, currency: 'EGP', inStock: true, image: null, gtin: null, mpn: null, crumbs: [] }; run.healed++; } }
       if (it?.title && it.price) { if (!(await accept(it, validators))) await crawler.autoscaledPool?.abort(); }
       else { const p = seen[request.url]; seen[request.url] = { ...(p ?? { first: Date.now() }), last: Date.now(), fails: (p?.fails ?? 0) + 1 }; }
     },
@@ -170,21 +175,23 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
 export async function hunt(o: { stores?: string[]; max?: number; dry: boolean; minRoom?: number }) {
   const st = loadState();
   const budget = o.dry ? null : await getBudget();
-  if (!o.dry && (!budget || budget.exhausted || budget.used >= budget.bgCap - (o.minRoom ?? 3000))) {
+  const room = budget ? budget.bgCap - budget.used : Infinity;
+  const tight = !o.dry && room < TIGHT_ROOM; // tight budget: no plan reads, no report writes
+  if (!o.dry && (!budget || budget.exhausted || room < (o.minRoom ?? MIN_ROOM))) {
     const r = { at: new Date().toISOString(), status: 'skipped', reason: budget?.exhausted ? 'D1 daily write limit exhausted; waiting for 00:00 UTC reset' : `write budget too low (${budget?.used ?? '?'} / ${budget?.bgCap ?? '?'})` };
-    console.log(JSON.stringify(r)); await report(r); return r;
+    console.log(JSON.stringify(r)); if (!budget?.exhausted) await report(r); return r;
   }
   // Stores are different hosts, so they hunt in parallel: the per-host delay still applies to every host,
   // and the shared D1 write budget is enforced server-side per batch (each sink stops on its budget flag).
   const targets = STORES.filter((x) => (o.stores?.length ? o.stores.includes(x.id) : x.kind === 'sitemap'));
   const runs: StoreRun[] = await Promise.all(targets.map(async (s) => {
-    try { return await huntStore(s, st, o); } catch (e) { return { store: s.id, status: 'error', note: String(e).slice(0, 200), candidates: 0, queued: 0, fetched: 0, extracted: 0, healed: 0, unchanged: 0, ms: 0 } as StoreRun; }
+    try { return await huntStore(s, st, { ...o, tight }); } catch (e) { return { store: s.id, status: 'error', note: String(e).slice(0, 200), candidates: 0, queued: 0, fetched: 0, extracted: 0, healed: 0, unchanged: 0, ms: 0 } as StoreRun; }
   }));
   await closeBrowser();
   saveState(st);
   for (const r of runs) console.log(JSON.stringify(r));
   const summary = { at: new Date().toISOString(), dry: o.dry, stores: runs, totals: { fetched: runs.reduce((a, r) => a + r.fetched, 0), sent: runs.reduce((a, r) => a + (r.sink?.sent ?? 0), 0), created: runs.reduce((a, r) => a + (r.sink?.created ?? 0), 0) }, budgetAfter: o.dry ? null : await getBudget() };
   mkdirSync('out', { recursive: true }); writeFileSync('out/health.json', JSON.stringify(summary, null, 2));
-  if (!o.dry) await report({ status: 'done', ...summary, stores: runs.map((r) => `${r.store}:${r.status}:${r.fetched}/${r.queued}${r.sink ? `→${r.sink.created}+${r.sink.merged}` : ''}${r.note ? ` (${r.note})` : ''}`) });
+  if (!o.dry && !tight) await report({ status: 'done', ...summary, stores: runs.map((r) => `${r.store}:${r.status}:${r.fetched}/${r.queued}${r.sink ? `→${r.sink.created}+${r.sink.merged}` : ''}${r.note ? ` (${r.note})` : ''}`) });
   return summary;
 }

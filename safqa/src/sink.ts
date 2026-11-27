@@ -2,14 +2,14 @@
 // D1 write budget (100k rows/day for the whole account on the free plan). Stops the moment the API says the
 // budget is used up. Dry runs write JSONL instead.
 import { appendFileSync, mkdirSync } from 'node:fs';
-import { API, TOKEN } from './config.ts';
+import { API, BATCH_SIZE, TOKEN } from './config.ts';
 import type { Item } from './extract/jsonld.ts';
 
 export interface SinkStats { sent: number; created: number; merged: number; rejected: number; budgetStop: boolean; lastUsed?: number }
 export class Sink {
   private buf: Item[] = [];
   stats: SinkStats = { sent: 0, created: 0, merged: 0, rejected: 0, budgetStop: false };
-  constructor(private store: string, private dry: boolean, private batch = 6) { if (dry) mkdirSync('out', { recursive: true }); }
+  constructor(private store: string, private dry: boolean, private batch = BATCH_SIZE) { if (dry) mkdirSync('out', { recursive: true }); }
   async add(it: Item) { if (this.stats.budgetStop) return false; this.buf.push(it); if (this.buf.length >= this.batch) await this.flush(); return !this.stats.budgetStop; }
   async flush() {
     if (!this.buf.length) return;
