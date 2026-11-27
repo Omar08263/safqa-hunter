@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { BasicCrawler, Configuration, log } from 'crawlee';
 import { cooldownMs, REFUSAL_STATUSES, THROTTLE_STATUSES } from './config.ts';
-import { browserFetch } from './browser.ts';
+import { browserFetch, closeBrowser } from './browser.ts';
 import { shopify, woocommerce } from './adapters/feeds.ts';
 import { streamSitemap } from './adapters/sitemap.ts';
 import { extract, type Item } from './extract/jsonld.ts';
@@ -180,6 +180,7 @@ export async function hunt(o: { stores?: string[]; max?: number; dry: boolean; m
   const runs: StoreRun[] = await Promise.all(targets.map(async (s) => {
     try { return await huntStore(s, st, o); } catch (e) { return { store: s.id, status: 'error', note: String(e).slice(0, 200), candidates: 0, queued: 0, fetched: 0, extracted: 0, healed: 0, unchanged: 0, ms: 0 } as StoreRun; }
   }));
+  await closeBrowser();
   saveState(st);
   for (const r of runs) console.log(JSON.stringify(r));
   const summary = { at: new Date().toISOString(), dry: o.dry, stores: runs, totals: { fetched: runs.reduce((a, r) => a + r.fetched, 0), sent: runs.reduce((a, r) => a + (r.sink?.sent ?? 0), 0), created: runs.reduce((a, r) => a + (r.sink?.created ?? 0), 0) }, budgetAfter: o.dry ? null : await getBudget() };

@@ -40,3 +40,10 @@ export async function browserFetch(url: string): Promise<string | null> {
   await awaitTurn(new URL(url).host);
   return (await viaPlaywright(url)) ?? viaDumpDom(url);
 }
+
+/** Close the shared browser so the process can exit (an open Chromium keeps the event loop alive). */
+export async function closeBrowser(): Promise<void> {
+  const b = browserP ? await browserP.catch(() => null) : null;
+  browserP = null;
+  await b?.close().catch(() => undefined);
+}
