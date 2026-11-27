@@ -115,6 +115,7 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
   let refused = '';
   let refusedMs: number | undefined; // undefined = graduated ladder step; set only for throttles (Retry-After)
   let browserBudget = 20; // browser-grade renders per store run (JS-only public pages)
+  let firstHtml = ''; // kept for the extraction-break snapshot below
   const crawler = new BasicCrawler({
     maxConcurrency: 2, maxRequestRetries: 1, requestHandlerTimeoutSecs: 90, maxRequestsPerCrawl: max,
     async requestHandler({ request }) {
@@ -130,6 +131,7 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
       if (THROTTLE_STATUSES.has(r.status)) { refused = `HTTP ${r.status}`; refusedMs = Math.min(parseRetryAfter(r.headers) ?? cooldownMs((st.refusals[s.id] ?? 0) + 1), 24 * H); await crawler.autoscaledPool?.abort(); return; }
       if (r.status !== 200) { const p = seen[request.url]; seen[request.url] = { ...(p ?? { first: Date.now() }), last: Date.now(), fails: (p?.fails ?? 0) + 1 }; return; }
       const html = await r.text();
+      if (!firstHtml) firstHtml = html;
       if (looksLikeChallenge(html)) { refused = 'challenge page (we never solve captchas)'; await crawler.autoscaledPool?.abort(); return; }
       const validators = { etag: r.headers.get('etag') ?? undefined, lastModified: r.headers.get('last-modified') ?? undefined };
       let { item, candidates, pageTitle } = extract(html, request.url);
@@ -150,6 +152,11 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
   });
   await crawler.run(queue.map((url) => ({ url, uniqueKey: url })));
   await sink.flush();
+  // Extraction-break detection: pages answered but nothing extracted → the store likely changed its
+  // markup. Keep one HTML snapshot in the run artifact so the extractor can be repaired from evidence.
+  if (!refused && run.fetched >= 10 && run.extracted === 0 && firstHtml) {
+    try { mkdirSync('out', { recursive: true }); writeFileSync(`out/${s.id}-break.html`, firstHtml); } catch { /* snapshot is best-effort */ }
+  }
   if (refused) noteRefusal(refusedMs);
   else if (run.fetched > 0) st.refusals[s.id] = 0; // store answered: reset the escalation ladder
   run.sink = sink.stats; run.groups = keys.size;

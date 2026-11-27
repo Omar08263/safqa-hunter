@@ -60,6 +60,30 @@ describe('scheduler lastmod awareness', () => {
   });
 });
 
+describe('microdata extraction layer', () => {
+  it('extracts Product from itemscope/itemprop when JSON-LD is absent', () => {
+    const html = `<html><head><title>x</title></head><body>
+      <div itemscope itemtype="https://schema.org/Product">
+        <h1 itemprop="name">Test Phone</h1>
+        <span itemprop="brand">Acme</span>
+        <meta itemprop="priceCurrency" content="EGP">
+        <span itemprop="price" content="12999">12,999 EGP</span>
+        <link itemprop="availability" href="https://schema.org/InStock">
+        <img itemprop="image" src="https://example.com/p.jpg">
+      </div></body></html>`;
+    const { item } = extract(html, 'https://example.com/p');
+    expect(item?.title).toBe('Test Phone');
+    expect(item?.price).toBe(12999);
+    expect(item?.brand).toBe('Acme');
+    expect(item?.inStock).toBe(true);
+  });
+  it('JSON-LD still wins over microdata when both exist', () => {
+    const html = `<html><head><script type="application/ld+json">{"@type":"Product","name":"LD Phone","offers":{"price":5000,"priceCurrency":"EGP"}}</script></head>
+      <body><div itemscope itemtype="https://schema.org/Product"><span itemprop="name">MD Phone</span><span itemprop="price" content="9999"></span></div></body></html>`;
+    expect(extract(html, 'https://example.com/p').item?.title).toBe('LD Phone');
+  });
+});
+
 describe('extractor pageTitle fallback (heal input when item is null)', () => {
   it('returns og:title even with no structured product', () => {
     const html = '<meta property="og:title" content="Widget X"><div class="price">EGP 999</div>';

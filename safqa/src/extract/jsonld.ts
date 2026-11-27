@@ -1,5 +1,6 @@
 // Structured-data extractor (the extruct idea, in TS): schema.org Product in JSON-LD (incl. @graph,
-// ProductGroup/hasVariant, Offer/AggregateOffer), then OpenGraph product meta. Returns the store's own data only.
+// ProductGroup/hasVariant, Offer/AggregateOffer), then microdata (itemscope), then OpenGraph product meta.
+// Returns the store's own data only.
 import { load } from 'cheerio';
 
 export interface Item { url: string; title: string; brand: string | null; price: number | null; listPrice: number | null; currency: string; inStock: boolean; image: string | null; gtin: string | null; mpn: string | null; crumbs: string[] }
@@ -27,7 +28,19 @@ export function extract(html: string, url: string): { item: Item | null; candida
       inStock: !/OutOfStock|SoldOut|Discontinued/i.test(String(o.availability ?? '')), image: [].concat(prod.image ?? [])[0] ? String(typeof [].concat(prod.image)[0] === 'object' ? ([].concat(prod.image)[0] as any).url : [].concat(prod.image)[0]) : meta('og:image'),
       gtin: String(prod.gtin13 ?? prod.gtin ?? prod.gtin12 ?? prod.gtin14 ?? prod.gtin8 ?? '') || null, mpn: String(prod.mpn ?? '') || null, crumbs, // sku is store-internal: never used for cross-store matching
     };
-  } else if (meta('product:price:amount') || meta('og:price:amount')) {
+  } else if ($('[itemscope][itemtype*="Product" i]').length) {
+    // Microdata layer: many stores publish schema.org Product as itemscope/itemprop instead of JSON-LD.
+    const scope = $('[itemscope][itemtype*="Product" i]').first();
+    const prop = (p: string) => { const el = scope.find(`[itemprop="${p}"]`).first(); return (el.attr('content') ?? el.attr('href') ?? el.attr('src') ?? el.text()).trim(); };
+    const price = num(prop('price'));
+    const name = prop('name') || meta('og:title') || $('title').text().trim();
+    if (price && name) item = {
+      url, title: name, brand: prop('brand') || null, price, listPrice: null,
+      currency: prop('priceCurrency') || 'EGP', inStock: !/OutOfStock|SoldOut|Discontinued/i.test(prop('availability')),
+      image: prop('image') || meta('og:image'), gtin: prop('gtin13') || prop('gtin') || null, mpn: prop('mpn') || null, crumbs,
+    };
+  }
+  if (!item && (meta('product:price:amount') || meta('og:price:amount'))) {
     item = { url, title: meta('og:title') ?? $('title').text().trim(), brand: meta('product:brand'), price: num(meta('product:price:amount') ?? meta('og:price:amount')), listPrice: null, currency: meta('product:price:currency') ?? 'EGP', inStock: !/oos|out of stock/i.test(meta('product:availability') ?? ''), image: meta('og:image'), gtin: null, mpn: null, crumbs };
   }
   // Price-like text candidates for the AI self-healing fallback (only used when structured data has no price).
