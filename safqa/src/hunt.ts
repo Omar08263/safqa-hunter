@@ -12,6 +12,7 @@ import { browserFetch, closeBrowser } from './browser.ts';
 import { shopify, woocommerce } from './adapters/feeds.ts';
 import { streamSitemap } from './adapters/sitemap.ts';
 import { extract, type Item } from './extract/jsonld.ts';
+import { readabilityProposal } from './extract/readability.ts';
 import { looksLikeChallenge, parseRetryAfter, politeFetch } from './http.ts';
 import { loadRobots } from './robots.ts';
 import { countAnomalies, matchKey, plausibleEgp } from './safqa-core.ts';
@@ -162,6 +163,12 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
         if (rendered && !looksLikeChallenge(rendered)) ({ item, candidates, pageTitle } = extract(rendered, request.url));
       }
       let it = item;
+      // Fifth layer (proposal-only): Readability mines the main text for price-like lines when
+      // structured layers found nothing. Proposals still pass heal + plausibleEgp + Zod.
+      if (!it && !candidates.length) {
+        const prop = readabilityProposal(html, request.url);
+        if (prop?.candidates.length) { candidates.push(...prop.candidates); if (!pageTitle && prop.title) pageTitle = prop.title; }
+      }
       // Self-heal is capped per store run (each call costs a Worker request + potential writes),
       // throttled (<=2 in flight, 1 start/s) and behind the store's circuit breaker.
       const tryHeal = async (title: string) => guarded(s.id, async () => {
