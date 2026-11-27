@@ -9,6 +9,7 @@ on:
       stores: { description: 'comma-separated store ids (default: all sitemap stores)', required: false, default: '' }
       max: { description: 'max pages per store (default: per-store)', required: false, default: '' }
       dry: { description: 'dry run (no writes; output as artifact)', type: boolean, default: false }
+      analytics: { description: 'DuckDB price-history report from out/*.jsonl (artifact only, no D1 writes)', type: boolean, default: false }
 concurrency: { group: safqa-hunt, cancel-in-progress: false }
 permissions: { contents: read }
 jobs:
@@ -18,10 +19,20 @@ jobs:
     defaults: { run: { working-directory: safqa } }
     steps:
       - uses: actions/checkout@v4
+      # NOTE: package-manager-cache stays OFF on purpose — the repo root's devEngines forces pnpm,
+      # so setup-node's npm cache step dies with EBADDEVENGINES (see commit a5e5966). We cache manually.
       - uses: actions/setup-node@v4
         with: { node-version: 22, package-manager-cache: false }
+      - name: prepare cache dirs (npm, Playwright browsers, ONNX models)
+        run: mkdir -p ~/.cache/ms-playwright models
       - uses: actions/cache@v4
-        with: { path: ~/.npm, key: 'npm-${{ hashFiles(''safqa/package-lock.json'') }}', restore-keys: 'npm-' }
+        with:
+          path: |
+            ~/.npm
+            ~/.cache/ms-playwright
+            safqa/models
+          key: 'safqa-deps-${{ hashFiles(''safqa/package-lock.json'') }}'
+          restore-keys: 'safqa-deps-'
       - run: npm ci
       - uses: actions/cache/restore@v4
         with: { path: safqa/state, key: 'safqa-state-${{ github.run_id }}', restore-keys: 'safqa-state-' }
@@ -32,14 +43,74 @@ jobs:
           MAX: ${{ inputs.max }}
           DRY: ${{ inputs.dry }}
         run: |
+          set -o pipefail
+          mkdir -p out
           ARGS=""
           [ -n "$STORES" ] && ARGS="$ARGS --stores $STORES"
           [ -n "$MAX" ] && ARGS="$ARGS --max $MAX"
           [ "$DRY" = "true" ] && ARGS="$ARGS --dry"
-          npx tsx src/cli.ts hunt $ARGS
+          npx tsx src/cli.ts hunt $ARGS 2>&1 | tee out/hunt.log
+      # Optional, dispatch-only: price-history analytics over this run's dry-run JSONL.
+      # Reads out/*.jsonl only; writes nothing to D1; the report rides along in the artifact below.
+      - name: DuckDB analytics (dispatch only)
+        if: always() && inputs.analytics == true
+        run: |
+          python3 -m pip install --quiet duckdb
+          python3 - <<'PY'
+          import duckdb, glob, os
+          files = sorted(glob.glob('out/*.jsonl'))
+          lines = ['# Safqa price-history report', '']
+          if not files:
+              lines.append('No out/*.jsonl files in this run (analytics needs a dry hunt).')
+          else:
+              con = duckdb.connect()
+              for f in files:
+                  store = os.path.basename(f)[:-6]
+                  try:
+                      n, lo, avg, hi = con.execute(
+                          "SELECT count(*), min(price), avg(price), max(price) FROM read_json_auto(?, union_by_name=true)",
+                          [f]).fetchone()
+                      lines.append(f'- **{store}**: {n} items, price min={lo} avg={avg:.1f} max={hi}' if n else f'- **{store}**: 0 items')
+                  except Exception as e:
+                      lines.append(f'- **{store}**: could not parse ({e})')
+          open('out/analytics-report.md', 'w').write('\n'.join(lines) + '\n')
+          print('\n'.join(lines))
+          PY
       - uses: actions/cache/save@v4
         if: always()
         with: { path: safqa/state, key: 'safqa-state-${{ github.run_id }}' }
+      # health.json + extraction-break snapshots (out/*-break.html) + dry-run JSONL + hunt log + analytics report.
       - uses: actions/upload-artifact@v4
         if: always()
-        with: { name: 'hunt-${{ github.run_id }}', path: 'safqa/out/', retention-days: 7, if-no-files-found: ignore }
+        with:
+          name: 'hunt-${{ github.run_id }}'
+          path: |
+            safqa/out/health.json
+            safqa/out/*-break.html
+            safqa/out/*.jsonl
+            safqa/out/hunt.log
+            safqa/out/analytics-report.md
+          retention-days: 7
+          if-no-files-found: ignore
+      # Dead-man switch: ping Healthchecks.io on success; silence there = alert.
+      # Needs repo secret HEALTHCHECKS_PING_URL (the check's ping URL). Skips cleanly until set.
+      - name: Healthchecks.io ping (on success)
+        if: success() && env.HC_PING_URL != ''
+        env:
+          HC_PING_URL: ${{ secrets.HEALTHCHECKS_PING_URL }}
+        run: curl -fsS -m 10 --retry 3 "$HC_PING_URL" || true
+      # Failure alert to ntfy. Needs repo secret NTFY_TOPIC (topic name only; server defaults to ntfy.sh,
+      # override with repo variable NTFY_SERVER). Skips cleanly until set.
+      - name: ntfy failure alert
+        if: failure() && env.NTFY_TOPIC != ''
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_SERVER: ${{ vars.NTFY_SERVER }}
+        run: |
+          SERVER="${NTFY_SERVER:-https://ntfy.sh}"
+          curl -fsS -m 10 --retry 2 \
+            -H "Title: Safqa hunt FAILED" \
+            -H "Priority: high" \
+            -H "Tags: warning" \
+            -d "safqa-hunt run failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            "$SERVER/$NTFY_TOPIC" || true

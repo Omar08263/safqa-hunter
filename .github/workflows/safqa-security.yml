@@ -1,0 +1,75 @@
+# Security scans for the Safqa hunter (safqa/ only — the repo root is upstream Crawlee).
+# Advisory findings (Semgrep, Trivy) never break the build; Gitleaks fails the run on a
+# confirmed secret in safqa/ so a leaked credential cannot slip through quietly.
+name: safqa-security
+on:
+  push: { paths: ['safqa/**', '.github/workflows/safqa-security.yml'] }
+  pull_request: { paths: ['safqa/**', '.github/workflows/safqa-security.yml'] }
+  schedule:
+    - cron: '0 3 * * 1'   # weekly, Monday 03:00 UTC
+  workflow_dispatch:
+permissions: { contents: read, pull-requests: read }
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - 'safqa/src/**'
+              - 'safqa/test/**'
+              - 'safqa/package.json'
+              - 'safqa/package-lock.json'
+              - '.github/workflows/safqa-security.yml'
+  semgrep:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || (github.event_name != 'push' && github.event_name != 'pull_request')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep (OWASP + JS/TS rules, advisory)
+        continue-on-error: true
+        run: |
+          python3 -m pip install --quiet semgrep
+          semgrep --metrics off \
+            --config p/owasp-top-ten \
+            --config p/javascript \
+            --config p/typescript \
+            --json --output semgrep.json \
+            safqa/src safqa/test || true
+          python3 -c "import json;d=json.load(open('semgrep.json'));print('semgrep findings:',len(d.get('results',[])))"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'semgrep-${{ github.run_id }}', path: semgrep.json, retention-days: 7, if-no-files-found: ignore }
+  trivy:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || (github.event_name != 'push' && github.event_name != 'pull_request')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy dependency scan (advisory)
+        continue-on-error: true
+        run: |
+          docker run --rm -v "$PWD:/work" aquasec/trivy:latest fs \
+            --scanners vuln --severity HIGH,CRITICAL --exit-code 0 \
+            --format json --output /work/trivy.json /work/safqa
+          python3 -c "import json;d=json.load(open('trivy.json'));print('trivy results:',sum(len(r.get('Vulnerabilities') or []) for r in d.get('Results') or []))"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: 'trivy-${{ github.run_id }}', path: trivy.json, retention-days: 7, if-no-files-found: ignore }
+  gitleaks:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || (github.event_name != 'push' && github.event_name != 'pull_request')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Hard gate: fails the run if a secret is found in the safqa/ working tree.
+      - name: Gitleaks secret scan (gate)
+        run: |
+          docker run --rm -v "$PWD:/work" zricethezav/gitleaks:latest detect \
+            --source /work/safqa --no-git --redact --exit-code 1

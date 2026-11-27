@@ -47,6 +47,16 @@
 				"got-scraping"
 			],
 			"minimumReleaseAge": "0 days"
+		},
+		{
+			"description": "Safqa hunter (safqa/): conservative weekly grouped PRs, never automerged — replaces the stuck Dependabot npm updater for this package. crawlee/cheerio stay pinned via the global ignoreDeps above (hunter pins crawlee 3.18.2 deliberately). The global tsx<=4.21.0 freeze is upstream-only and must not downgrade the hunter's tsx ^4.23.",
+			"matchFileNames": ["safqa/package.json"],
+			"groupName": "safqa dependencies",
+			"groupSlug": "safqa-deps",
+			"schedule": ["before 6am on Monday"],
+			"automerge": false,
+			"allowedVersions": ">=0",
+			"minimumReleaseAge": "3 days"
 		}
 	],
 	"schedule": ["every weekday"],
