@@ -44,7 +44,7 @@ export const llamaCppProposer: LlmProposer = (prompt) => new Promise((resolve) =
   let settled = false;
   const done = (v: string | null) => { if (!settled) { settled = true; resolve(v); } };
   try {
-    const child = spawn(LLAMA_BIN, ['-m', HEAL_LLM_MODEL, '-p', prompt, '-n', '160', '-c', '4096', '--temp', '0', '--no-warmup', '--cache-ram', '0'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    const child = spawn(LLAMA_BIN, ['-m', HEAL_LLM_MODEL, '-p', prompt, '-n', '160', '-c', '4096', '--temp', '0', '--no-warmup', '--cache-ram', '0', '-st'], { stdio: ['ignore', 'pipe', 'ignore'] });
     const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } done(null); }, HEAL_LLM_TIMEOUT_MS);
     child.stdout.on('data', (d: Buffer) => { out += d.toString(); if (out.length > 65_536) { try { child.kill('SIGKILL'); } catch { /* gone */ } } });
     child.on('error', () => { clearTimeout(timer); done(null); });
@@ -110,21 +110,24 @@ export function buildPrompt(html: string, url: string, title: string): string {
 }
 
 /** Strict output parse: only a JSON object with a CSS "selector" string survives. A model that
- *  answers with a price (or anything else) is rejected — it may never write prices. */
+ *  answers with a price (or anything else) is rejected — it may never write prices. llama-cli
+ *  echoes the prompt (which itself contains an example object), so invalid candidates are
+ *  skipped and the LAST valid selector wins — the model's answer comes after the echo. */
 export function parseSelectorOutput(raw: string | null): string | null {
   if (!raw) return null;
   const text = raw.replace(/<think>[\s\S]*?<\/think>/gi, ' ');
+  let found: string | null = null;
   for (const m of text.matchAll(/\{[^{}]*\}/g)) {
     try {
       const obj = JSON.parse(m[0]) as { selector?: unknown };
       if (typeof obj.selector !== 'string') continue;
       const sel = obj.selector.trim();
-      if (!sel || sel.length > 200) return null;
-      if (/[<{};`]/.test(sel) || sel.startsWith('/') || /javascript:/i.test(sel)) return null; // CSS only ('>' child combinator is legal), no XPath/markup
-      return sel;
+      if (!sel || sel.length > 200) continue;
+      if (/[<{};`]/.test(sel) || sel.startsWith('/') || /javascript:/i.test(sel)) continue; // CSS only ('>' child combinator is legal), no XPath/markup
+      found = sel;
     } catch { /* try next candidate object */ }
   }
-  return null;
+  return found;
 }
 
 // ---------------- the five deterministic checks ----------------

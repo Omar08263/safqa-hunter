@@ -4,7 +4,14 @@
 // Usage: SAFQA_HEAL_LLM=shadow SAFQA_LLAMA_BIN=... SAFQA_HEAL_LLM_MODEL=... npx tsx scripts/heal-llm-bench.ts [--dir <html-dir>]
 // With --dir, every *.html in the dir is also benched (expected price unknown → proposals only).
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { HealLlmBudget, HealLlmSession } from '../src/heal-llm.ts';
+import { HealLlmBudget, HealLlmSession, llamaCppProposer } from '../src/heal-llm.ts';
+
+// Debug wrapper: log the model's raw output (truncated) so a no-proposal is diagnosable.
+const debugProposer = async (prompt: string) => {
+  const raw = await llamaCppProposer(prompt);
+  console.log(JSON.stringify({ raw: (raw ?? '').slice(-600) }));
+  return raw;
+};
 
 interface Fixture { name: string; html: string; expected: number | null; url: string }
 const wrap = (title: string, body: string) => `<html><head><title>${title}</title></head><body><header>متجر</header><main><h1>${title}</h1>${body}</main><footer>©</footer></body></html>`;
@@ -31,7 +38,7 @@ const sessions = new Map<string, HealLlmSession>();
 const results: { name: string; expected: number | null; outcome?: string; price?: number | null; selector?: string | null; correct?: boolean }[] = [];
 for (const fx of fixtures) {
   const store = fx.name.split('/')[0]!;
-  const session = sessions.get(store) ?? new HealLlmSession(store, { budget });
+  const session = sessions.get(store) ?? new HealLlmSession(store, { budget, proposer: debugProposer });
   sessions.set(store, session);
   const before = session.summary().records.length;
   await session.tryHeal(fx.html, fx.url, []); // shadow: never adopts; records carry the verdict

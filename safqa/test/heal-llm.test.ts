@@ -41,6 +41,11 @@ describe('strict output parsing — the model may never write a price', () => {
     expect(parseSelectorOutput('{"selector":".final-cost"}')).toBe('.final-cost');
     expect(parseSelectorOutput('<think>hmm</think> {"selector":"div.buy > span"} done')).toBe('div.buy > span');
   });
+  it('survives prompt echo: skips the example object, last valid selector wins', () => {
+    const echo = 'Reply with ONLY {"selector":"<css selector>"} or {"selector":null}. ... {"selector":".final-cost"}';
+    expect(parseSelectorOutput(echo)).toBe('.final-cost');
+    expect(parseSelectorOutput('{"selector":"<css selector>"}')).toBeNull();
+  });
   it('rejects prices, XPath, markup, garbage and null', () => {
     expect(parseSelectorOutput('{"price":18999}')).toBeNull();
     expect(parseSelectorOutput('18999 جنيه')).toBeNull();
