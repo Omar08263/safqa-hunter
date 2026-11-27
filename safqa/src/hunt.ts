@@ -19,6 +19,8 @@ import { prioritise } from './scheduler.ts';
 import { getBudget, getPlan, heal, report, Sink } from './sink.ts';
 import { loadState, saveState, type State } from './state.ts';
 import { checkItem } from './validate.ts';
+import { guarded, throttledHeal } from './resilience.ts';
+import { log as plog, storeLog } from './log.ts';
 import { STORES, type Store } from './stores.ts';
 
 Configuration.getGlobalConfig().set('persistStorage', false);
@@ -30,7 +32,8 @@ export interface StoreRun { store: string; status: string; candidates: number; q
 export async function huntStore(s: Store, st: State, o: { max?: number; dry: boolean; tight?: boolean }): Promise<StoreRun> {
   const t0 = Date.now();
   const run: StoreRun = { store: s.id, status: 'ok', candidates: 0, queued: 0, fetched: 0, extracted: 0, healed: 0, unchanged: 0, ms: 0 };
-  const done = (status: string, note?: string) => ({ ...run, status, note, ms: Date.now() - t0 });
+  const slog = storeLog(s.id);
+  const done = (status: string, note?: string) => { const r = { ...run, status, note, ms: Date.now() - t0 }; slog.info({ run: r }, 'store run finished'); return r; };
   // Graduated escalation: a refusal is never final — re-test after 1 h, then 3/6/12/24 h if it repeats;
   // any successful fetch resets the ladder. Throttles (429/503) use the server's Retry-After when given.
   const noteRefusal = (ms?: number) => { const n = (st.refusals[s.id] ?? 0) + 1; st.refusals[s.id] = n; st.refusedUntil[s.id] = Date.now() + (ms ?? cooldownMs(n)); };
@@ -159,9 +162,15 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
         if (rendered && !looksLikeChallenge(rendered)) ({ item, candidates, pageTitle } = extract(rendered, request.url));
       }
       let it = item;
-      // Self-heal is capped per store run (each call costs a Worker request + potential writes).
-      if (it && !it.price && candidates.length && run.healed < HEAL_CAP) { const ai = await heal(new URL(request.url).host, it.title, candidates); if (ai?.price && plausibleEgp(ai.price)) { it = { ...it, price: ai.price }; run.healed++; } }
-      if (!it && candidates.length && pageTitle && run.healed < HEAL_CAP) { const ai = await heal(new URL(request.url).host, pageTitle, candidates); if (ai?.price && plausibleEgp(ai.price)) { it = { url: request.url, title: pageTitle, brand: null, price: ai.price, listPrice: null, currency: 'EGP', inStock: true, image: null, gtin: null, mpn: null, crumbs: [] }; run.healed++; } }
+      // Self-heal is capped per store run (each call costs a Worker request + potential writes),
+      // throttled (<=2 in flight, 1 start/s) and behind the store's circuit breaker.
+      const tryHeal = async (title: string) => guarded(s.id, async () => {
+        const r = await throttledHeal(() => heal(new URL(request.url).host, title, candidates));
+        if (!r) throw new Error('heal returned nothing');
+        return r;
+      });
+      if (it && !it.price && candidates.length && run.healed < HEAL_CAP) { const ai = await tryHeal(it.title); if (ai?.price && plausibleEgp(ai.price)) { it = { ...it, price: ai.price }; run.healed++; } }
+      if (!it && candidates.length && pageTitle && run.healed < HEAL_CAP) { const ai = await tryHeal(pageTitle); if (ai?.price && plausibleEgp(ai.price)) { it = { url: request.url, title: pageTitle, brand: null, price: ai.price, listPrice: null, currency: 'EGP', inStock: true, image: null, gtin: null, mpn: null, crumbs: [] }; run.healed++; } }
       if (it?.title && it.price) { if (!(await accept(it, validators))) await crawler.autoscaledPool?.abort(); }
       else { const p = seen[request.url]; seen[request.url] = { ...(p ?? { first: Date.now() }), last: Date.now(), fails: (p?.fails ?? 0) + 1 }; }
     },
@@ -187,7 +196,7 @@ export async function hunt(o: { stores?: string[]; max?: number; dry: boolean; m
   const tight = !o.dry && room < TIGHT_ROOM; // tight budget: no plan reads, no report writes
   if (!o.dry && (!budget || budget.exhausted || room < (o.minRoom ?? MIN_ROOM))) {
     const r = { at: new Date().toISOString(), status: 'skipped', reason: budget?.exhausted ? 'D1 daily write limit exhausted; waiting for 00:00 UTC reset' : `write budget too low (${budget?.used ?? '?'} / ${budget?.bgCap ?? '?'})` };
-    console.log(JSON.stringify(r)); if (!budget?.exhausted) await report(r); return r;
+    plog.warn({ run: r }, 'hunt skipped'); console.log(JSON.stringify(r)); if (!budget?.exhausted) await report(r); return r;
   }
   // Stores are different hosts, so they hunt in parallel: the per-host delay still applies to every host,
   // and the shared D1 write budget is enforced server-side per batch (each sink stops on its budget flag).
@@ -198,6 +207,7 @@ export async function hunt(o: { stores?: string[]; max?: number; dry: boolean; m
   await closeBrowser();
   saveState(st);
   for (const r of runs) console.log(JSON.stringify(r));
+  plog.info({ stores: runs.length, fetched: runs.reduce((a, r) => a + r.fetched, 0), sent: runs.reduce((a, r) => a + (r.sink?.sent ?? 0), 0), unchanged: runs.reduce((a, r) => a + r.unchanged, 0) }, 'hunt finished');
   const summary = { at: new Date().toISOString(), dry: o.dry, stores: runs, totals: { fetched: runs.reduce((a, r) => a + r.fetched, 0), sent: runs.reduce((a, r) => a + (r.sink?.sent ?? 0), 0), created: runs.reduce((a, r) => a + (r.sink?.created ?? 0), 0) }, budgetAfter: o.dry ? null : await getBudget() };
   mkdirSync('out', { recursive: true }); writeFileSync('out/health.json', JSON.stringify(summary, null, 2));
   if (!o.dry && !tight) await report({ status: 'done', ...summary, stores: runs.map((r) => `${r.store}:${r.status}:${r.fetched}/${r.queued}${r.sink ? `→${r.sink.created}+${r.sink.merged}` : ''}${r.note ? ` (${r.note})` : ''}`) });
