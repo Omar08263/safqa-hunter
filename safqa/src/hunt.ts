@@ -117,7 +117,8 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
   //    politeFetch still enforces the per-host delay between request starts, so the per-host rate is unchanged.
   let refused = '';
   let refusedMs: number | undefined; // undefined = graduated ladder step; set only for throttles (Retry-After)
-  let browserBudget = 20; // browser-grade renders per store run (JS-only public pages)
+  let browserBudget = 10; // browser-grade renders per store run (JS-only public pages)
+  const browserDeadline = Date.now() + 120_000; // total browser time per store run is capped at 2 min
   let firstHtml = ''; // kept for the extraction-break snapshot below
   const crawler = new BasicCrawler({
     maxConcurrency: 2, maxRequestRetries: 1, requestHandlerTimeoutSecs: 90, maxRequestsPerCrawl: max,
@@ -138,7 +139,7 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
       if (looksLikeChallenge(html)) { refused = 'challenge page (we never solve captchas)'; await crawler.autoscaledPool?.abort(); return; }
       const validators = { etag: r.headers.get('etag') ?? undefined, lastModified: r.headers.get('last-modified') ?? undefined };
       let { item, candidates, pageTitle } = extract(html, request.url);
-      if (!item && !candidates.length && browserBudget > 0) {
+      if (!item && !candidates.length && browserBudget > 0 && Date.now() < browserDeadline) {
         // Public page answered 200 but carries no structured price and no price-like text:
         // it may render prices with JS. One browser-grade render (honest UA, same delay) — never for refusals.
         browserBudget--;
