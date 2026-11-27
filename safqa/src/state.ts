@@ -1,7 +1,11 @@
 // Run-to-run memory (persisted by actions/cache in CI): which URLs we have seen, when we last fetched them,
 // a hash of what we last sent (unchanged pages are not re-sent), sitemap ETags, and per-store refusals.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+
+/** Max sitemap entries cached per sitemap URL. A 2.8M-entry sitemap (samsung, 2026-11-27) blew
+ *  past V8's max string length in JSON.stringify and crashed saveState — cap the cache hard. */
+export const SITEMAP_CACHE_MAX = 100_000;
 
 export interface UrlState {
   first: number; last?: number; hash?: string; fails?: number; etag?: string; lastModified?: string;
@@ -29,5 +33,31 @@ export function loadState(): State {
   }
   catch { return { urls: {}, etags: {}, refusedUntil: {}, refusals: {}, sitemapCache: {} }; }
 }
-export function saveState(s: State) { mkdirSync(dirname(FILE), { recursive: true }); writeFileSync(FILE, JSON.stringify(s)); }
+/** Streamed save: never builds one giant string (RangeError on huge sitemap caches).
+ *  Oversized sitemap caches are truncated to SITEMAP_CACHE_MAX entries on the way out. */
+export async function saveState(s: State): Promise<void> {
+  mkdirSync(dirname(FILE), { recursive: true });
+  const ws = createWriteStream(FILE);
+  const done = new Promise<void>((resolve, reject) => { ws.on('finish', resolve); ws.on('error', reject); });
+  const write = (chunk: string) => { ws.write(chunk); };
+  write('{"urls":');
+  write(JSON.stringify(s.urls));
+  write(',"etags":');
+  write(JSON.stringify(s.etags));
+  write(',"refusedUntil":');
+  write(JSON.stringify(s.refusedUntil));
+  write(',"refusals":');
+  write(JSON.stringify(s.refusals));
+  write(',"sitemapCache":{');
+  let first = true;
+  for (const [k, v] of Object.entries(s.sitemapCache)) {
+    if (!first) write(',');
+    first = false;
+    const entries = v.entries.length > SITEMAP_CACHE_MAX ? v.entries.slice(0, SITEMAP_CACHE_MAX) : v.entries;
+    write(`${JSON.stringify(k)}:{"etag":${JSON.stringify(v.etag ?? null)},"entries":${JSON.stringify(entries)}}`);
+  }
+  write('}}');
+  ws.end();
+  await done;
+}
 export const stateExists = () => existsSync(FILE);

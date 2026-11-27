@@ -18,7 +18,7 @@ import { loadRobots } from './robots.ts';
 import { countAnomalies, matchKey, plausibleEgp } from './safqa-core.ts';
 import { prioritise } from './scheduler.ts';
 import { getBudget, getPlan, heal, report, Sink } from './sink.ts';
-import { loadState, saveState, type State } from './state.ts';
+import { loadState, saveState, SITEMAP_CACHE_MAX, type State } from './state.ts';
 import { checkItem } from './validate.ts';
 import { guarded, throttledHeal } from './resilience.ts';
 import { log as plog, storeLog } from './log.ts';
@@ -113,7 +113,7 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
       await collect(cached?.entries?.length ? cached.etag : undefined);
       if (notModified && !cached?.entries?.length) { notModified = false; await collect(undefined); }
     } catch (err) { log.warning(`${s.id}: ${String(err)}`); }
-    if (!notModified && fresh.length) st.sitemapCache[sm] = { etag: st.etags[sm], entries: fresh };
+    if (!notModified && fresh.length) st.sitemapCache[sm] = { etag: st.etags[sm], entries: fresh.slice(0, SITEMAP_CACHE_MAX) }; // cap: a multi-million-entry sitemap must not blow up state
     const entries = notModified && cached ? cached.entries : fresh.length ? fresh : (cached?.entries ?? []);
     for (const ent of entries) {
       const u = (s.preferLang && ent.alternates[s.preferLang]) || ent.loc;
@@ -212,7 +212,7 @@ export async function hunt(o: { stores?: string[]; max?: number; dry: boolean; m
     try { return await huntStore(s, st, { ...o, tight }); } catch (e) { return { store: s.id, status: 'error', note: String(e).slice(0, 200), candidates: 0, queued: 0, fetched: 0, extracted: 0, healed: 0, unchanged: 0, ms: 0 } as StoreRun; }
   }));
   await closeBrowser();
-  saveState(st);
+  await saveState(st);
   for (const r of runs) console.log(JSON.stringify(r));
   plog.info({ stores: runs.length, fetched: runs.reduce((a, r) => a + r.fetched, 0), sent: runs.reduce((a, r) => a + (r.sink?.sent ?? 0), 0), unchanged: runs.reduce((a, r) => a + r.unchanged, 0) }, 'hunt finished');
   const summary = { at: new Date().toISOString(), dry: o.dry, stores: runs, totals: { fetched: runs.reduce((a, r) => a + r.fetched, 0), sent: runs.reduce((a, r) => a + (r.sink?.sent ?? 0), 0), created: runs.reduce((a, r) => a + (r.sink?.created ?? 0), 0) }, budgetAfter: o.dry ? null : await getBudget() };
