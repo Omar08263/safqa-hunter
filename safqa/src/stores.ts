@@ -13,6 +13,7 @@ export const STORES: Store[] = [
   { id: 'jumia', base: 'https://www.jumia.com.eg', kind: 'sitemap', sitemaps: [1, 2, 3].map((n) => `https://static.jumia.com.eg/products-sitemap-${n}.xml.gz`), product: /-\d+\.html$/, maxPages: 200 },
   { id: 'elaraby', base: 'https://www.elarabygroup.com', kind: 'sitemap', maxPages: 0, disabled: 'answers 404 to SafqaBot on every URL (Nov 2026); no public feed found; we do not evade' },
   // The Worker already polls these Shopify feeds every 10 min; the hunter only backfills them on demand.
+  { id: 'dream2000', base: 'https://www.dream2000.com', kind: 'shopify', maxPages: 40 }, // public Shopify feed verified by probe 2026-11-27
   { id: 'kimo', base: 'https://kimostore.net', kind: 'shopify', maxPages: 40 },
   { id: 'compumarts', base: 'https://www.compumarts.com', kind: 'shopify', maxPages: 40 },
   { id: 'tradeline', base: 'https://tradelinestores.com', kind: 'shopify', maxPages: 20 },
