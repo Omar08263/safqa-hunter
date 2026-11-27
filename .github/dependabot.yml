@@ -1,0 +1,17 @@
+# Version updates for the Safqa hunter's own dependencies only.
+# The repo root is the upstream Crawlee pnpm workspace; Dependabot's npm updater
+# errors on it (security jobs at / fail in update_files), so root manifests are
+# deliberately not configured here. The hunter's own package lives in /safqa.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly, day: sunday, time: "04:00", timezone: Africa/Cairo }
+    open-pull-requests-limit: 2
+    groups: { actions: { patterns: ["*"] } }
+  - package-ecosystem: npm
+    directory: /safqa
+    schedule: { interval: weekly, day: sunday, time: "04:00", timezone: Africa/Cairo }
+    open-pull-requests-limit: 3
+    groups:
+      minor-and-patch: { update-types: [minor, patch] }
