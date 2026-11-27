@@ -2,10 +2,11 @@
 // ProductGroup/hasVariant, Offer/AggregateOffer), then microdata (itemscope), then OpenGraph product meta.
 // Returns the store's own data only.
 import { load } from 'cheerio';
+import { parsePrice } from '../text.ts';
 
 export interface Item { url: string; title: string; brand: string | null; price: number | null; listPrice: number | null; currency: string; inStock: boolean; image: string | null; gtin: string | null; mpn: string | null; crumbs: string[] }
 
-const num = (v: unknown) => { const n = Number(String(v ?? '').replace(/[^\d.]/g, '')); return Number.isFinite(n) && n > 0 ? n : null; };
+const num = parsePrice; // Arabic-Indic digits (٠١٢٣) convert before parsing — the old strip silently dropped them
 function flat(x: any): any[] { if (!x) return []; if (Array.isArray(x)) return x.flatMap(flat); if (x['@graph']) return flat(x['@graph']); return [x, ...(x.hasVariant ? flat(x.hasVariant) : [])]; }
 const isType = (o: any, t: string) => [].concat(o?.['@type'] ?? []).some((x: string) => String(x).toLowerCase() === t.toLowerCase());
 

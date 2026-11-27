@@ -18,13 +18,14 @@ import { countAnomalies, matchKey, plausibleEgp } from './safqa-core.ts';
 import { prioritise } from './scheduler.ts';
 import { getBudget, getPlan, heal, report, Sink } from './sink.ts';
 import { loadState, saveState, type State } from './state.ts';
+import { checkItem } from './validate.ts';
 import { STORES, type Store } from './stores.ts';
 
 Configuration.getGlobalConfig().set('persistStorage', false);
 const H = 3600_000;
 const itemHash = (it: Item) => createHash('sha1').update([it.title, it.price, it.listPrice, it.inStock].join('|')).digest('hex').slice(0, 16);
 
-export interface StoreRun { store: string; status: string; candidates: number; queued: number; fetched: number; extracted: number; healed: number; unchanged: number; anomalies?: number; sink?: Sink['stats']; groups?: number; ms: number; note?: string }
+export interface StoreRun { store: string; status: string; candidates: number; queued: number; fetched: number; extracted: number; healed: number; unchanged: number; invalid?: number; anomalies?: number; sink?: Sink['stats']; groups?: number; ms: number; note?: string }
 
 export async function huntStore(s: Store, st: State, o: { max?: number; dry: boolean; tight?: boolean }): Promise<StoreRun> {
   const t0 = Date.now();
@@ -41,9 +42,16 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
   const seen = (st.urls[s.id] ??= {});
   const keys = new Set<string>();
   const priced: { key: string; price: number }[] = [];
-  const accept = async (it: Item, validators?: { etag?: string; lastModified?: string }) => {
+  const accept = async (raw: Item, validators?: { etag?: string; lastModified?: string }) => {
     run.extracted++;
-    const prev = seen[it.url];
+    const prev = seen[raw.url];
+    const checked = checkItem(raw); // Zod gate: price>0, EGP, valid URL, non-empty title — before anything reaches D1
+    if (!checked.ok) {
+      run.invalid = (run.invalid ?? 0) + 1;
+      seen[raw.url] = { ...(prev ?? { first: Date.now() }), last: Date.now(), fails: (prev?.fails ?? 0) + 1, scrapeStatus: 'failed' };
+      return true;
+    }
+    const it = checked.item;
     if (!plausibleEgp(it.price)) { // NaN/0/placeholder/absurd price: never sent; back the URL off like a failure
       // scrapeStatus records the failure WITHOUT touching hash/sentAt: the last known-good value stays authoritative.
       seen[it.url] = { ...(prev ?? { first: Date.now() }), last: Date.now(), fails: (prev?.fails ?? 0) + 1, scrapeStatus: 'failed' };
