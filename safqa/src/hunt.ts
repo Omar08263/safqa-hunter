@@ -14,7 +14,7 @@ import { streamSitemap } from './adapters/sitemap.ts';
 import { extract, type Item } from './extract/jsonld.ts';
 import { looksLikeChallenge, parseRetryAfter, politeFetch } from './http.ts';
 import { loadRobots } from './robots.ts';
-import { matchKey, plausibleEgp } from './safqa-core.ts';
+import { countAnomalies, matchKey, plausibleEgp } from './safqa-core.ts';
 import { prioritise } from './scheduler.ts';
 import { getBudget, getPlan, heal, report, Sink } from './sink.ts';
 import { loadState, saveState, type State } from './state.ts';
@@ -24,7 +24,7 @@ Configuration.getGlobalConfig().set('persistStorage', false);
 const H = 3600_000;
 const itemHash = (it: Item) => createHash('sha1').update([it.title, it.price, it.listPrice, it.inStock].join('|')).digest('hex').slice(0, 16);
 
-export interface StoreRun { store: string; status: string; candidates: number; queued: number; fetched: number; extracted: number; healed: number; unchanged: number; sink?: Sink['stats']; groups?: number; ms: number; note?: string }
+export interface StoreRun { store: string; status: string; candidates: number; queued: number; fetched: number; extracted: number; healed: number; unchanged: number; anomalies?: number; sink?: Sink['stats']; groups?: number; ms: number; note?: string }
 
 export async function huntStore(s: Store, st: State, o: { max?: number; dry: boolean }): Promise<StoreRun> {
   const t0 = Date.now();
@@ -40,6 +40,7 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
   const sink = new Sink(s.id, o.dry);
   const seen = (st.urls[s.id] ??= {});
   const keys = new Set<string>();
+  const priced: { key: string; price: number }[] = [];
   const accept = async (it: Item, validators?: { etag?: string; lastModified?: string }) => {
     run.extracted++;
     const prev = seen[it.url];
@@ -47,7 +48,9 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
       seen[it.url] = { ...(prev ?? { first: Date.now() }), last: Date.now(), fails: (prev?.fails ?? 0) + 1 };
       return true;
     }
-    keys.add(matchKey({ title: it.title, brand: it.brand, gtin: it.gtin, mpn: it.mpn }));
+    const key = matchKey({ title: it.title, brand: it.brand, gtin: it.gtin, mpn: it.mpn });
+    keys.add(key);
+    if (it.price) priced.push({ key, price: it.price });
     const h = itemHash(it);
     const keepValidators = { ...(validators?.etag ? { etag: validators.etag } : {}), ...(validators?.lastModified ? { lastModified: validators.lastModified } : {}) };
     if (prev?.hash === h && prev.last && Date.now() - prev.last < 72 * H) { seen[it.url] = { ...prev, last: Date.now(), ...keepValidators }; run.unchanged++; return true; } // unchanged: costs no writes
@@ -66,7 +69,7 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
       if (status && THROTTLE_STATUSES.has(status)) { noteRefusal(Math.min(ra ?? cooldownMs((st.refusals[s.id] ?? 0) + 1), 24 * H)); await sink.flush(); return done('refused', `HTTP ${status} (Retry-After honoured)`); }
       throw e;
     }
-    await sink.flush(); run.sink = sink.stats; run.groups = keys.size;
+    await sink.flush(); run.sink = sink.stats; run.groups = keys.size; run.anomalies = countAnomalies(priced);
     if (run.fetched > 0) st.refusals[s.id] = 0; // store answered: reset the escalation ladder
     return done(sink.stats.budgetStop ? 'budget' : 'ok');
   }
@@ -159,7 +162,7 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
   }
   if (refused) noteRefusal(refusedMs);
   else if (run.fetched > 0) st.refusals[s.id] = 0; // store answered: reset the escalation ladder
-  run.sink = sink.stats; run.groups = keys.size;
+  run.sink = sink.stats; run.groups = keys.size; run.anomalies = countAnomalies(priced);
   return done(refused ? 'refused' : sink.stats.budgetStop ? 'budget' : 'ok', refused || undefined);
 }
 

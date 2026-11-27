@@ -3,7 +3,7 @@
 //   tsx src/cli.ts hunt [--stores btech,2b] [--max 500] [--dry]
 //   tsx src/cli.ts probe https://store.example     store-adapter generator (robots, feeds, sitemap, JSON-LD)
 //   tsx src/cli.ts budget                           today's D1 write budget as the Safqa API sees it
-import { STOP_STATUSES, UA } from './config.ts';
+import { STOP_STATUSES, TOKEN, UA } from './config.ts';
 import { streamSitemap } from './adapters/sitemap.ts';
 import { extract } from './extract/jsonld.ts';
 import { politeFetch } from './http.ts';
@@ -40,6 +40,7 @@ async function probe(input: string) {
 }
 
 if (cmd === 'hunt') {
+  if (!args.includes('--dry') && !TOKEN) { console.error('SAFQA_HUNTER_TOKEN is not set: refusing a real hunt whose every batch would fail auth. Set the secret, or run with --dry.'); process.exit(2); }
   const r = await hunt({ stores: opt('stores')?.split(',').filter(Boolean), max: Number(opt('max')) || undefined, dry: args.includes('--dry') });
   console.log(JSON.stringify((r as { totals?: unknown }).totals ?? r));
 } else if (cmd === 'probe' && args[1]) await probe(args[1]);

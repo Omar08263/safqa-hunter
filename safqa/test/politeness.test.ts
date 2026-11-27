@@ -31,6 +31,19 @@ describe('graduated refusal cooldown', () => {
   });
 });
 
+describe('statistical price anomalies', () => {
+  it('flags >40% deviations from the group median, ignores small groups', async () => {
+    const { countAnomalies } = await import('../src/safqa-core.ts');
+    const priced = [
+      { key: 'a', price: 100 }, { key: 'a', price: 105 }, { key: 'a', price: 98 }, { key: 'a', price: 300 }, // 300 deviates
+      { key: 'b', price: 50 }, { key: 'b', price: 500 }, // group of 2: ignored
+      { key: 'c', price: 1000 }, { key: 'c', price: 1010 }, { key: 'c', price: 990 }, // clean
+    ];
+    expect(countAnomalies(priced)).toBe(1);
+    expect(countAnomalies([])).toBe(0);
+  });
+});
+
 describe('price sanity gate', () => {
   it('rejects NaN, zero, placeholders and absurd values', () => {
     expect(plausibleEgp(NaN)).toBe(false);

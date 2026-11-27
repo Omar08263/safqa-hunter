@@ -133,6 +133,23 @@ const LINE_BRANDS: [RegExp, string][] = [
  * Cross-store match key. GTIN wins; otherwise brand + model tokens + storage/RAM (variants never merge).
  * Colour is ignored (same price across colours at most stores) unless the title is only a colour variant.
  */
+/** Statistical price-anomaly flag: within one run, group prices by product match key (groups of 3+)
+ *  and count items deviating more than 40% from their group median — likely extraction errors or
+ *  placeholder prices that passed the plausibility gate. Flag-only: never blocks a send. */
+export function countAnomalies(priced: { key: string; price: number }[]): number {
+  const groups = new Map<string, number[]>();
+  for (const p of priced) { const g = groups.get(p.key) ?? []; g.push(p.price); groups.set(p.key, g); }
+  let n = 0;
+  for (const prices of groups.values()) {
+    if (prices.length < 3) continue;
+    const sorted = [...prices].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)]!;
+    if (!(median > 0)) continue;
+    for (const p of prices) if (Math.abs(p - median) / median > 0.4) n++;
+  }
+  return n;
+}
+
 export function matchKey(o: { title: string; brand?: string | null; gtin?: string | null; mpn?: string | null }): string {
   const gtin = (o.gtin ?? '').replace(/\D/g, '');
   if (gtin.length >= 8 && !/^0+$/.test(gtin)) return `g:${gtin.padStart(14, '0')}`;
