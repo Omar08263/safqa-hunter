@@ -23,6 +23,16 @@ describe('Zod observation gate', () => {
     expect(r.ok).toBe(true);
     if (r.ok) { expect(r.item.gtin).toBeNull(); expect(r.item.listPrice).toBeNull(); }
   });
+  it('drops a non-URL image ("undefined", junk, relative) to null instead of invalidating the item (IKEA)', () => {
+    for (const image of ['undefined', 'null', 'not-a-url', '/img/x.jpg', '']) {
+      const r = checkItem({ ...base, image });
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.item.image).toBeNull();
+    }
+    const ok = checkItem({ ...base, image: 'https://img.example/a.jpg' });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.item.image).toBe('https://img.example/a.jpg');
+  });
 });
 
 describe('Arabic digits + price parsing', () => {

@@ -19,6 +19,24 @@ describe('JSON-LD extractor', () => {
     const { item, candidates } = extract('<div class="product-price">EGP 1,250</div>', 'u');
     expect(item).toBeNull(); expect(candidates[0]?.text).toContain('1,250');
   });
+  it('never emits image "undefined" for a url-less ImageObject (IKEA shape): falls back to og:image, else null', () => {
+    const withOg = `<meta property="og:image" content="https://www.ikea.com/eg/en/images/products/x.jpg"><script type="application/ld+json">{"@type":"Product","name":"BILLY bookcase","image":[{"@type":"ImageObject"}],"offers":{"@type":"Offer","priceCurrency":"EGP","price":2999}}</script>`;
+    expect(extract(withOg, 'https://www.ikea.com/eg/en/p/billy-1/').item?.image).toBe('https://www.ikea.com/eg/en/images/products/x.jpg');
+    const noOg = `<script type="application/ld+json">{"@type":"Product","name":"BILLY bookcase","image":{"@type":"ImageObject"},"offers":{"@type":"Offer","priceCurrency":"EGP","price":2999}}</script>`;
+    expect(extract(noOg, 'https://www.ikea.com/eg/en/p/billy-1/').item?.image).toBeNull();
+    const literal = `<script type="application/ld+json">{"@type":"Product","name":"BILLY bookcase","image":"undefined","offers":{"@type":"Offer","priceCurrency":"EGP","price":2999}}</script>`;
+    expect(extract(literal, 'https://www.ikea.com/eg/en/p/billy-1/').item?.image).toBeNull();
+  });
+  it('keeps a valid image, picks the first valid candidate, and resolves relative image URLs', () => {
+    const valid = `<script type="application/ld+json">{"@type":"Product","name":"X","image":"https://img.example/a.jpg","offers":{"@type":"Offer","priceCurrency":"EGP","price":10}}</script>`;
+    expect(extract(valid, 'https://store.example/p/1').item?.image).toBe('https://img.example/a.jpg');
+    const mixed = `<script type="application/ld+json">{"@type":"Product","name":"X","image":[{"@type":"ImageObject"},"https://img.example/b.jpg"],"offers":{"@type":"Offer","priceCurrency":"EGP","price":10}}</script>`;
+    expect(extract(mixed, 'https://store.example/p/1').item?.image).toBe('https://img.example/b.jpg');
+    const rel = `<script type="application/ld+json">{"@type":"Product","name":"X","image":"/img/c.jpg","offers":{"@type":"Offer","priceCurrency":"EGP","price":10}}</script>`;
+    expect(extract(rel, 'https://store.example/p/1').item?.image).toBe('https://store.example/img/c.jpg');
+    const obj = `<script type="application/ld+json">{"@type":"Product","name":"X","image":{"@type":"ImageObject","url":"https://img.example/d.jpg"},"offers":{"@type":"Offer","priceCurrency":"EGP","price":10}}</script>`;
+    expect(extract(obj, 'https://store.example/p/1').item?.image).toBe('https://img.example/d.jpg');
+  });
 });
 
 describe('scheduler', () => {

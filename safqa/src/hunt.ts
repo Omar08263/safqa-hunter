@@ -6,8 +6,8 @@
 // no parse and no writes. Stores run in parallel (different hosts; the per-host delay still applies).
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { BasicCrawler, Configuration, log } from 'crawlee';
-import { cooldownMs, HEAL_CAP, MIN_ROOM, REFUSAL_STATUSES, THROTTLE_STATUSES, TIGHT_ROOM, UNCHANGED_WINDOW_MS } from './config.ts';
+import { BasicCrawler, Configuration, log, RequestQueue } from 'crawlee';
+import { cooldownMs, HEAL_CAP, MIN_ROOM, REFUSAL_STATUSES, ROBOTS_FALLBACK_MAX_FILES, ROBOTS_FALLBACK_MAX_URLS, THROTTLE_STATUSES, TIGHT_ROOM, UNCHANGED_WINDOW_MS } from './config.ts';
 import { browserFetch, closeBrowser } from './browser.ts';
 import { shopify, woocommerce } from './adapters/feeds.ts';
 import { streamSitemap } from './adapters/sitemap.ts';
@@ -25,6 +25,21 @@ import { log as plog, storeLog } from './log.ts';
 import { STORES, type Store } from './stores.ts';
 
 Configuration.getGlobalConfig().set('persistStorage', false);
+
+/** Per-store, per-crawl request queue (2026-11-27 fix): parallel BasicCrawlers must never share
+ *  Crawlee's default queue, or one store's URLs get handled (and attributed) by another store. */
+let queueSeq = 0;
+export function storeQueueName(storeId: string): string {
+  return `safqa-${storeId}-${process.pid}-${Date.now()}-${++queueSeq}`.replace(/[^a-zA-Z0-9-_]/g, '-');
+}
+export async function openStoreQueue(storeId: string): Promise<RequestQueue> {
+  return RequestQueue.open(storeQueueName(storeId));
+}
+/** First N sitemap files only (robots-fallback cap); no cap when maxFiles is unset. */
+export function limitSitemapList(list: string[], maxFiles?: number): string[] {
+  return maxFiles && maxFiles > 0 ? list.slice(0, maxFiles) : [...list];
+}
+
 const H = 3600_000;
 const itemHash = (it: Item) => createHash('sha1').update([it.title, it.price, it.listPrice, it.inStock].join('|')).digest('hex').slice(0, 16);
 
@@ -94,14 +109,19 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
   //    If the configured sitemaps yield nothing, fall back to the sitemaps robots.txt declares.
   const urls: string[] = [];
   const lastmods: Record<string, string> = {};
-  const collectSitemaps = async (list: string[]) => {
-  for (const sm of list) {
+  const collectSitemaps = async (list: string[], caps?: { maxFiles?: number; maxUrls?: number }) => {
+  let added = 0; // product URLs collected by THIS call (the fallback budget counts these)
+  for (const sm of limitSitemapList(list, caps?.maxFiles)) {
+    if (caps?.maxUrls && added >= caps.maxUrls) break;
     if (!robots.allowed(sm)) continue;
     const cached = st.sitemapCache[sm];
     const fresh: { loc: string; lastmod?: string; alternates: Record<string, string> }[] = [];
     let notModified = false;
     const collect = async (etag?: string) => {
-      for await (const e of streamSitemap(sm, { etag })) {
+      // Capped calls stop streaming early (shared entry budget incl. nested files) instead of
+      // downloading every declared sitemap; uncapped primary sitemaps stream as before.
+      const remaining = caps?.maxUrls ? Math.max(0, caps.maxUrls - added) : undefined;
+      for await (const e of streamSitemap(sm, { etag, ...(remaining !== undefined ? { maxEntries: remaining, maxNested: caps?.maxFiles } : {}) })) {
         if ('etag' in e && !('loc' in e)) { if (e.etag) st.etags[sm] = e.etag; continue; }
         if ('notModified' in e) { notModified = true; continue; }
         fresh.push(e as { loc: string; lastmod?: string; alternates: Record<string, string> });
@@ -116,13 +136,19 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
     if (!notModified && fresh.length) st.sitemapCache[sm] = { etag: st.etags[sm], entries: fresh.slice(0, SITEMAP_CACHE_MAX) }; // cap: a multi-million-entry sitemap must not blow up state
     const entries = notModified && cached ? cached.entries : fresh.length ? fresh : (cached?.entries ?? []);
     for (const ent of entries) {
+      if (caps?.maxUrls && added >= caps.maxUrls) break;
       const u = (s.preferLang && ent.alternates[s.preferLang]) || ent.loc;
-      if (s.product?.test(u) && robots.allowed(u)) { urls.push(u); if (ent.lastmod) lastmods[u] = ent.lastmod; }
+      if (s.product?.test(u) && robots.allowed(u)) { urls.push(u); added++; if (ent.lastmod) lastmods[u] = ent.lastmod; }
     }
   }
   };
-  await collectSitemaps(s.sitemaps?.length ? s.sitemaps : robots.sitemaps);
-  if (!urls.length && s.sitemaps?.length && robots.sitemaps.length) await collectSitemaps(robots.sitemaps);
+  // Configured sitemaps are the primary channel (uncapped); anything read from robots.txt is the
+  // fallback and is hard-capped (first N files / M URLs) so a refused store declaring dozens of
+  // sitemaps cannot stretch the whole hunt. Cached entries still respect SITEMAP_CACHE_MAX above.
+  const fallbackCaps = { maxFiles: ROBOTS_FALLBACK_MAX_FILES, maxUrls: ROBOTS_FALLBACK_MAX_URLS };
+  if (s.sitemaps?.length) await collectSitemaps(s.sitemaps);
+  else await collectSitemaps(robots.sitemaps, fallbackCaps);
+  if (!urls.length && s.sitemaps?.length && robots.sitemaps.length) await collectSitemaps(robots.sitemaps, fallbackCaps);
   run.candidates = urls.length;
   const max = Math.min(o.max ?? s.maxPages, s.maxPages);
   const queue = prioritise([...new Set(urls)], seen, o.tight ? [] : await getPlan(s.id), max, Date.now(), lastmods); // tight budget: skip the plan read
@@ -136,7 +162,9 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
   let browserBudget = 10; // browser-grade renders per store run (JS-only public pages)
   const browserDeadline = Date.now() + 120_000; // total browser time per store run is capped at 2 min
   let firstHtml = ''; // kept for the extraction-break snapshot below
+  const requestQueue = await openStoreQueue(s.id); // isolated per store+crawl: never Crawlee's shared default queue
   const crawler = new BasicCrawler({
+    requestQueue,
     maxConcurrency: 2, maxRequestRetries: 1, requestHandlerTimeoutSecs: 90, maxRequestsPerCrawl: max,
     async requestHandler({ request }) {
       if (refused || sink.stats.budgetStop) return;
@@ -183,7 +211,8 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
     },
     failedRequestHandler({ request }) { const p = seen[request.url]; seen[request.url] = { ...(p ?? { first: Date.now() }), last: Date.now(), fails: (p?.fails ?? 0) + 1 }; },
   });
-  await crawler.run(queue.map((url) => ({ url, uniqueKey: url })));
+  try { await crawler.run(queue.map((url) => ({ url, uniqueKey: url }))); }
+  finally { try { await requestQueue.drop(); } catch { /* in-memory queue: best-effort cleanup */ } }
   await sink.flush();
   // Extraction-break detection: pages answered but nothing extracted → the store likely changed its
   // markup. Keep one HTML snapshot in the run artifact so the extractor can be repaired from evidence.

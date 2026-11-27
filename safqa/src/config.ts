@@ -24,3 +24,10 @@ export const MIN_ROOM = Math.floor(num(process.env.SAFQA_MIN_ROOM, 8000));
 export const TIGHT_ROOM = Math.floor(num(process.env.SAFQA_TIGHT_ROOM, MIN_ROOM * 2));
 /** Max AI self-heal calls per store run. */
 export const HEAL_CAP = Math.floor(num(process.env.SAFQA_HEAL_CAP, 50));
+
+/** Hard caps for the robots.txt sitemap fallback (2026-11-27: a refused store whose robots.txt
+ *  declares dozens of sitemaps streamed them all and stretched a full hunt to ~31 min). The
+ *  fallback reads at most this many sitemap files and collects at most this many product URLs;
+ *  configured (primary) sitemaps are uncapped here and still respect SITEMAP_CACHE_MAX. */
+export const ROBOTS_FALLBACK_MAX_FILES = Math.floor(num(process.env.SAFQA_ROBOTS_FALLBACK_FILES, 5));
+export const ROBOTS_FALLBACK_MAX_URLS = Math.floor(num(process.env.SAFQA_ROBOTS_FALLBACK_URLS, 20_000));

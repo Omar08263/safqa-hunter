@@ -19,6 +19,14 @@ export const itemSchema = z.object({
 
 export type ItemCheck = { ok: true; item: Item } | { ok: false; issues: string[] };
 
+/** A non-URL image (e.g. the literal "undefined" from a url-less ImageObject) is dropped to null —
+ *  like a junk GTIN — instead of failing the whole observation at the schema gate. */
+const validImage = (raw: string | null | undefined): string | null => {
+  const s = raw?.trim();
+  if (!s || s === 'undefined' || s === 'null') return null;
+  try { const u = new URL(s); return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : null; } catch { return null; }
+};
+
 /** Normalise then validate: trims strings, drops a non-numeric GTIN, coerces empty optionals to null. */
 export function checkItem(raw: Item): ItemCheck {
   const item: Item = {
@@ -28,7 +36,7 @@ export function checkItem(raw: Item): ItemCheck {
     currency: (raw.currency || 'EGP').toUpperCase(),
     gtin: raw.gtin && /^\d{8,14}$/.test(raw.gtin.replace(/\D/g, '')) ? raw.gtin.replace(/\D/g, '') : null,
     mpn: raw.mpn?.trim() || null,
-    image: raw.image?.trim() || null,
+    image: validImage(raw.image),
     listPrice: raw.listPrice && raw.price && raw.listPrice > raw.price ? raw.listPrice : null,
     crumbs: (raw.crumbs ?? []).map((c) => c.trim()).filter(Boolean).slice(0, 12),
   };

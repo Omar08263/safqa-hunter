@@ -10,6 +10,25 @@ const num = parsePrice; // Arabic-Indic digits (٠١٢٣) convert before parsing
 function flat(x: any): any[] { if (!x) return []; if (Array.isArray(x)) return x.flatMap(flat); if (x['@graph']) return flat(x['@graph']); return [x, ...(x.hasVariant ? flat(x.hasVariant) : [])]; }
 const isType = (o: any, t: string) => [].concat(o?.['@type'] ?? []).some((x: string) => String(x).toLowerCase() === t.toLowerCase());
 
+/** Only absolute http(s) image URLs survive; anything else (an ImageObject without url — IKEA's
+ *  shape — the literal string "undefined", junk) becomes null instead of failing the whole item
+ *  at the Zod gate. Relative URLs resolve against the page URL. */
+export function validImageUrl(raw: unknown, pageUrl?: string): string | null {
+  let v: unknown = raw;
+  if (v && typeof v === 'object') v = (v as { url?: unknown; contentUrl?: unknown }).url ?? (v as { contentUrl?: unknown }).contentUrl ?? null;
+  if (typeof v !== 'string') return null;
+  const s = v.trim();
+  if (!s || s === 'undefined' || s === 'null' || s === '[object Object]') return null;
+  try { const u = new URL(s); return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : null; } catch { /* relative URL: resolve below */ }
+  if (pageUrl) { try { const u = new URL(s, pageUrl); return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : null; } catch { return null; } }
+  return null;
+}
+/** First valid image among the structured candidates, else a valid og:image, else null. */
+function pickImage(image: unknown, pageUrl: string, og: string | null): string | null {
+  for (const c of Array.isArray(image) ? image : [image]) { const u = validImageUrl(c, pageUrl); if (u) return u; }
+  return validImageUrl(og, pageUrl);
+}
+
 export function extract(html: string, url: string): { item: Item | null; candidates: { cls: string; text: string }[]; pageTitle: string } {
   const $ = load(html);
   const nodes: any[] = [];
@@ -26,7 +45,7 @@ export function extract(html: string, url: string): { item: Item | null; candida
     item = {
       url, title: String(prod.name ?? meta('og:title') ?? '').trim(), brand: typeof prod.brand === 'string' ? prod.brand : prod.brand?.name ?? null,
       price, listPrice: list && price && list > price ? list : null, currency: String(o.priceCurrency ?? 'EGP'),
-      inStock: !/OutOfStock|SoldOut|Discontinued/i.test(String(o.availability ?? '')), image: [].concat(prod.image ?? [])[0] ? String(typeof [].concat(prod.image)[0] === 'object' ? ([].concat(prod.image)[0] as any).url : [].concat(prod.image)[0]) : meta('og:image'),
+      inStock: !/OutOfStock|SoldOut|Discontinued/i.test(String(o.availability ?? '')), image: pickImage(prod.image, url, meta('og:image')),
       gtin: String(prod.gtin13 ?? prod.gtin ?? prod.gtin12 ?? prod.gtin14 ?? prod.gtin8 ?? '') || null, mpn: String(prod.mpn ?? '') || null, crumbs, // sku is store-internal: never used for cross-store matching
     };
   } else if ($('[itemscope][itemtype*="Product" i]').length) {
@@ -38,11 +57,11 @@ export function extract(html: string, url: string): { item: Item | null; candida
     if (price && name) item = {
       url, title: name, brand: prop('brand') || null, price, listPrice: null,
       currency: prop('priceCurrency') || 'EGP', inStock: !/OutOfStock|SoldOut|Discontinued/i.test(prop('availability')),
-      image: prop('image') || meta('og:image'), gtin: prop('gtin13') || prop('gtin') || null, mpn: prop('mpn') || null, crumbs,
+      image: pickImage(prop('image'), url, meta('og:image')), gtin: prop('gtin13') || prop('gtin') || null, mpn: prop('mpn') || null, crumbs,
     };
   }
   if (!item && (meta('product:price:amount') || meta('og:price:amount'))) {
-    item = { url, title: meta('og:title') ?? $('title').text().trim(), brand: meta('product:brand'), price: num(meta('product:price:amount') ?? meta('og:price:amount')), listPrice: null, currency: meta('product:price:currency') ?? 'EGP', inStock: !/oos|out of stock/i.test(meta('product:availability') ?? ''), image: meta('og:image'), gtin: null, mpn: null, crumbs };
+    item = { url, title: meta('og:title') ?? $('title').text().trim(), brand: meta('product:brand'), price: num(meta('product:price:amount') ?? meta('og:price:amount')), listPrice: null, currency: meta('product:price:currency') ?? 'EGP', inStock: !/oos|out of stock/i.test(meta('product:availability') ?? ''), image: validImageUrl(meta('og:image'), url), gtin: null, mpn: null, crumbs };
   }
   // Price-like text candidates for the AI self-healing fallback (only used when structured data has no price).
   const candidates: { cls: string; text: string }[] = [];
