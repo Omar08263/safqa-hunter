@@ -20,3 +20,12 @@ export async function politeFetch(url: string, o: { accept?: string; timeoutMs?:
   return { status: r.status, url: r.url, headers: r.headers, text: () => r.text(), body: r.body };
 }
 export const looksLikeChallenge = (html: string) => /captcha|cf-chl|challenge-platform|Attention Required|are you a robot/i.test(html.slice(0, 20000));
+
+/** Parse a Retry-After header (delta-seconds or HTTP-date) into milliseconds from `now`. Null when absent/invalid. */
+export function parseRetryAfter(headers: Headers, now = Date.now()): number | null {
+  const v = headers.get('retry-after')?.trim();
+  if (!v) return null;
+  if (/^\d+$/.test(v)) return Number(v) * 1000;
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? null : Math.max(0, t - now);
+}

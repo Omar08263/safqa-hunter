@@ -20,6 +20,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, package-manager-cache: false }
+      - uses: actions/cache@v4
+        with: { path: ~/.npm, key: 'npm-${{ hashFiles(''safqa/package-lock.json'') }}', restore-keys: 'npm-' }
       - run: npm ci
       - uses: actions/cache/restore@v4
         with: { path: safqa/state, key: 'safqa-state-${{ github.run_id }}', restore-keys: 'safqa-state-' }

@@ -2,6 +2,8 @@
 export const UA = 'SafqaBot/5.0 (+https://safqaeg.pages.dev/about; price comparison; contact via site)';
 export const UA_TOKEN = 'SafqaBot'; // the robots.txt group we obey (falls back to *)
 export const MIN_DELAY_MS = 2500; // between requests to the same host, raised by Crawl-delay if larger
-export const STOP_STATUSES = new Set([401, 403, 429, 503]); // the site is refusing us: stop that store for this run
+export const REFUSAL_STATUSES = new Set([401, 403]); // explicit refusal: stop that store for 24 h, never evade
+export const THROTTLE_STATUSES = new Set([429, 503]); // "slow down" signals: stop this run, honour Retry-After
+export const STOP_STATUSES = new Set([...REFUSAL_STATUSES, ...THROTTLE_STATUSES]); // union, kept for callers that only ask "stop?"
 export const API = process.env.SAFQA_API ?? 'https://safqa-api.safqaeg.workers.dev';
 export const TOKEN = process.env.SAFQA_HUNTER_TOKEN ?? '';

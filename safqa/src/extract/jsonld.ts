@@ -8,7 +8,7 @@ const num = (v: unknown) => { const n = Number(String(v ?? '').replace(/[^\d.]/g
 function flat(x: any): any[] { if (!x) return []; if (Array.isArray(x)) return x.flatMap(flat); if (x['@graph']) return flat(x['@graph']); return [x, ...(x.hasVariant ? flat(x.hasVariant) : [])]; }
 const isType = (o: any, t: string) => [].concat(o?.['@type'] ?? []).some((x: string) => String(x).toLowerCase() === t.toLowerCase());
 
-export function extract(html: string, url: string): { item: Item | null; candidates: { cls: string; text: string }[] } {
+export function extract(html: string, url: string): { item: Item | null; candidates: { cls: string; text: string }[]; pageTitle: string } {
   const $ = load(html);
   const nodes: any[] = [];
   $('script[type="application/ld+json"]').each((_, el) => { try { nodes.push(...flat(JSON.parse($(el).text().trim()))); } catch { /* skip broken block */ } });
@@ -33,5 +33,5 @@ export function extract(html: string, url: string): { item: Item | null; candida
   // Price-like text candidates for the AI self-healing fallback (only used when structured data has no price).
   const candidates: { cls: string; text: string }[] = [];
   if (!item?.price) $('[class*="price" i],[id*="price" i],[itemprop="price"]').slice(0, 30).each((_, el) => { const t = $(el).text().replace(/\s+/g, ' ').trim(); if (/\d/.test(t) && t.length < 80) candidates.push({ cls: ($(el).attr('class') ?? $(el).attr('id') ?? 'itemprop').slice(0, 100), text: t }); });
-  return { item, candidates };
+  return { item, candidates, pageTitle: (meta('og:title') ?? $('title').text()).trim() };
 }
