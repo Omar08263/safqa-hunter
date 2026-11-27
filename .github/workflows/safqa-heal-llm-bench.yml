@@ -28,7 +28,9 @@ jobs:
         run: |
           if [ ! -x /tmp/llama-bin/llama-cli ]; then
             mkdir -p /tmp/llama-bin /tmp/llama-dl
-            gh release download --repo ggml-org/llama.cpp --pattern '*bin-ubuntu-x64*' --dir /tmp/llama-dl --clobber
+            # llama.cpp ships binaries on bXXXX prereleases; the "latest" release has none.
+            TAG=$(gh release list --repo ggml-org/llama.cpp --limit 1 --json tagName --jq '.[0].tagName')
+            gh release download "$TAG" --repo ggml-org/llama.cpp --pattern "llama-${TAG}-bin-ubuntu-x64.tar.gz" --dir /tmp/llama-dl --clobber
             cd /tmp/llama-dl && for f in *; do case "$f" in *.zip) unzip -oq "$f";; *.tar.gz) tar xzf "$f";; esac; done
             find /tmp/llama-dl -name llama-cli -type f -exec cp {} /tmp/llama-bin/llama-cli \;
             find /tmp/llama-dl -name '*.so*' -exec cp {} /tmp/llama-bin/ \; || true
