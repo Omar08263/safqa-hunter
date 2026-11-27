@@ -7,7 +7,8 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { BasicCrawler, Configuration, log } from 'crawlee';
-import { REFUSAL_STATUSES, THROTTLE_STATUSES } from './config.ts';
+import { cooldownMs, REFUSAL_STATUSES, THROTTLE_STATUSES } from './config.ts';
+import { browserFetch } from './browser.ts';
 import { shopify, woocommerce } from './adapters/feeds.ts';
 import { streamSitemap } from './adapters/sitemap.ts';
 import { extract, type Item } from './extract/jsonld.ts';
@@ -29,10 +30,13 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
   const t0 = Date.now();
   const run: StoreRun = { store: s.id, status: 'ok', candidates: 0, queued: 0, fetched: 0, extracted: 0, healed: 0, unchanged: 0, ms: 0 };
   const done = (status: string, note?: string) => ({ ...run, status, note, ms: Date.now() - t0 });
+  // Graduated escalation: a refusal is never final — re-test after 1 h, then 3/6/12/24 h if it repeats;
+  // any successful fetch resets the ladder. Throttles (429/503) use the server's Retry-After when given.
+  const noteRefusal = (ms?: number) => { const n = (st.refusals[s.id] ?? 0) + 1; st.refusals[s.id] = n; st.refusedUntil[s.id] = Date.now() + (ms ?? cooldownMs(n)); };
   if (s.disabled) return done('disabled', s.disabled);
-  if ((st.refusedUntil[s.id] ?? 0) > Date.now()) return done('paused', 'store refused us recently; waiting 24 h');
+  if ((st.refusedUntil[s.id] ?? 0) > Date.now()) return done('paused', 'store refused us recently; cooling down (graduated)');
   const robots = await loadRobots(s.base);
-  if (robots.refused) { st.refusedUntil[s.id] = Date.now() + 24 * H; return done('refused', 'robots.txt answered 401/403'); }
+  if (robots.refused) { noteRefusal(); return done('refused', 'robots.txt answered 401/403'); }
   const sink = new Sink(s.id, o.dry);
   const seen = (st.urls[s.id] ??= {});
   const keys = new Set<string>();
@@ -58,18 +62,21 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
     try { for await (const it of (s.kind === 'shopify' ? shopify : woocommerce)(s.base, s.maxPages)) { run.fetched++; if (!(await accept(it))) break; } }
     catch (e) {
       const status = (e as { status?: number }).status; const ra = (e as { retryAfterMs?: number | null }).retryAfterMs;
-      if (status && REFUSAL_STATUSES.has(status)) { st.refusedUntil[s.id] = Date.now() + 24 * H; await sink.flush(); return done('refused', `HTTP ${status}`); }
-      if (status && THROTTLE_STATUSES.has(status)) { st.refusedUntil[s.id] = Date.now() + Math.min(ra ?? H, 24 * H); await sink.flush(); return done('refused', `HTTP ${status} (Retry-After honoured)`); }
+      if (status && REFUSAL_STATUSES.has(status)) { noteRefusal(); await sink.flush(); return done('refused', `HTTP ${status}`); }
+      if (status && THROTTLE_STATUSES.has(status)) { noteRefusal(Math.min(ra ?? cooldownMs((st.refusals[s.id] ?? 0) + 1), 24 * H)); await sink.flush(); return done('refused', `HTTP ${status} (Retry-After honoured)`); }
       throw e;
     }
     await sink.flush(); run.sink = sink.stats; run.groups = keys.size;
+    if (run.fetched > 0) st.refusals[s.id] = 0; // store answered: reset the escalation ladder
     return done(sink.stats.budgetStop ? 'budget' : 'ok');
   }
 
-  // 1) stream the sitemap(s) (chunked; ETag reuse when unchanged — a 304 replays the cached entry list)
+  // 1) stream the sitemap(s) (chunked; ETag reuse when unchanged — a 304 replays the cached entry list).
+  //    If the configured sitemaps yield nothing, fall back to the sitemaps robots.txt declares.
   const urls: string[] = [];
   const lastmods: Record<string, string> = {};
-  for (const sm of s.sitemaps?.length ? s.sitemaps : robots.sitemaps) {
+  const collectSitemaps = async (list: string[]) => {
+  for (const sm of list) {
     if (!robots.allowed(sm)) continue;
     const cached = st.sitemapCache[sm];
     const fresh: { loc: string; lastmod?: string; alternates: Record<string, string> }[] = [];
@@ -94,6 +101,9 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
       if (s.product?.test(u) && robots.allowed(u)) { urls.push(u); if (ent.lastmod) lastmods[u] = ent.lastmod; }
     }
   }
+  };
+  await collectSitemaps(s.sitemaps?.length ? s.sitemaps : robots.sitemaps);
+  if (!urls.length && s.sitemaps?.length && robots.sitemaps.length) await collectSitemaps(robots.sitemaps);
   run.candidates = urls.length;
   const max = Math.min(o.max ?? s.maxPages, s.maxPages);
   const queue = prioritise([...new Set(urls)], seen, await getPlan(s.id), max, Date.now(), lastmods);
@@ -103,7 +113,8 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
   // 2) fetch product pages through Crawlee's BasicCrawler. Concurrency 2 only overlaps fetch/parse/heal latency:
   //    politeFetch still enforces the per-host delay between request starts, so the per-host rate is unchanged.
   let refused = '';
-  let refusedMs = 24 * H;
+  let refusedMs: number | undefined; // undefined = graduated ladder step; set only for throttles (Retry-After)
+  let browserBudget = 20; // browser-grade renders per store run (JS-only public pages)
   const crawler = new BasicCrawler({
     maxConcurrency: 2, maxRequestRetries: 1, requestHandlerTimeoutSecs: 90, maxRequestsPerCrawl: max,
     async requestHandler({ request }) {
@@ -115,13 +126,20 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
       const r = await politeFetch(request.url, { headers: cond });
       run.fetched++;
       if (r.status === 304) { seen[request.url] = { ...(prev ?? { first: Date.now() }), last: Date.now(), fails: 0 }; run.unchanged++; return; } // unchanged: no body, no parse, no writes
-      if (REFUSAL_STATUSES.has(r.status)) { refused = `HTTP ${r.status}`; refusedMs = 24 * H; await crawler.autoscaledPool?.abort(); return; }
-      if (THROTTLE_STATUSES.has(r.status)) { refused = `HTTP ${r.status}`; refusedMs = Math.min(parseRetryAfter(r.headers) ?? H, 24 * H); await crawler.autoscaledPool?.abort(); return; }
+      if (REFUSAL_STATUSES.has(r.status)) { refused = `HTTP ${r.status}`; await crawler.autoscaledPool?.abort(); return; }
+      if (THROTTLE_STATUSES.has(r.status)) { refused = `HTTP ${r.status}`; refusedMs = Math.min(parseRetryAfter(r.headers) ?? cooldownMs((st.refusals[s.id] ?? 0) + 1), 24 * H); await crawler.autoscaledPool?.abort(); return; }
       if (r.status !== 200) { const p = seen[request.url]; seen[request.url] = { ...(p ?? { first: Date.now() }), last: Date.now(), fails: (p?.fails ?? 0) + 1 }; return; }
       const html = await r.text();
-      if (looksLikeChallenge(html)) { refused = 'challenge page (we never solve captchas)'; refusedMs = 24 * H; await crawler.autoscaledPool?.abort(); return; }
+      if (looksLikeChallenge(html)) { refused = 'challenge page (we never solve captchas)'; await crawler.autoscaledPool?.abort(); return; }
       const validators = { etag: r.headers.get('etag') ?? undefined, lastModified: r.headers.get('last-modified') ?? undefined };
-      const { item, candidates, pageTitle } = extract(html, request.url);
+      let { item, candidates, pageTitle } = extract(html, request.url);
+      if (!item && !candidates.length && browserBudget > 0) {
+        // Public page answered 200 but carries no structured price and no price-like text:
+        // it may render prices with JS. One browser-grade render (honest UA, same delay) — never for refusals.
+        browserBudget--;
+        const rendered = await browserFetch(request.url);
+        if (rendered && !looksLikeChallenge(rendered)) ({ item, candidates, pageTitle } = extract(rendered, request.url));
+      }
       let it = item;
       if (it && !it.price && candidates.length) { const ai = await heal(new URL(request.url).host, it.title, candidates); if (ai?.price && plausibleEgp(ai.price)) { it = { ...it, price: ai.price }; run.healed++; } }
       if (!it && candidates.length && pageTitle) { const ai = await heal(new URL(request.url).host, pageTitle, candidates); if (ai?.price && plausibleEgp(ai.price)) { it = { url: request.url, title: pageTitle, brand: null, price: ai.price, listPrice: null, currency: 'EGP', inStock: true, image: null, gtin: null, mpn: null, crumbs: [] }; run.healed++; } }
@@ -132,7 +150,8 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
   });
   await crawler.run(queue.map((url) => ({ url, uniqueKey: url })));
   await sink.flush();
-  if (refused) st.refusedUntil[s.id] = Date.now() + refusedMs;
+  if (refused) noteRefusal(refusedMs);
+  else if (run.fetched > 0) st.refusals[s.id] = 0; // store answered: reset the escalation ladder
   run.sink = sink.stats; run.groups = keys.size;
   return done(refused ? 'refused' : sink.stats.budgetStop ? 'budget' : 'ok', refused || undefined);
 }

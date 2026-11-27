@@ -4,15 +4,27 @@ import { MIN_DELAY_MS, UA } from './config.ts';
 
 const lastHit = new Map<string, number>();
 const delays = new Map<string, number>();
+const chains = new Map<string, Promise<unknown>>();
 export const setHostDelay = (host: string, ms: number) => delays.set(host, Math.max(MIN_DELAY_MS, ms));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Serialize request *starts* per host so concurrent callers cannot burst past the delay:
+ *  each caller waits for the previous caller's turn, then for the remaining gap. */
+export async function awaitTurn(host: string): Promise<void> {
+  const prev = chains.get(host) ?? Promise.resolve();
+  let release!: () => void;
+  chains.set(host, new Promise<void>((r) => { release = r; }));
+  await prev.catch(() => undefined);
+  const gap = (lastHit.get(host) ?? 0) + (delays.get(host) ?? MIN_DELAY_MS) - Date.now();
+  if (gap > 0) await sleep(gap);
+  lastHit.set(host, Date.now());
+  release();
+}
 
 export interface Got { status: number; url: string; headers: Headers; text: () => Promise<string>; body: ReadableStream<Uint8Array> | null }
 export async function politeFetch(url: string, o: { accept?: string; timeoutMs?: number; headers?: Record<string, string> } = {}): Promise<Got> {
   const host = new URL(url).host;
-  const gap = (lastHit.get(host) ?? 0) + (delays.get(host) ?? MIN_DELAY_MS) - Date.now();
-  if (gap > 0) await sleep(gap);
-  lastHit.set(host, Date.now());
+  await awaitTurn(host);
   const r = await fetch(url, {
     headers: { 'user-agent': UA, accept: o.accept ?? 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.5', 'accept-language': 'en,ar;q=0.8', ...(o.headers ?? {}) },
     redirect: 'follow', signal: AbortSignal.timeout(o.timeoutMs ?? 30_000),

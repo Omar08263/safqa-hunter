@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { cooldownMs } from '../src/config.ts';
 import { extract } from '../src/extract/jsonld.ts';
 import { parseRetryAfter } from '../src/http.ts';
 import { plausibleEgp } from '../src/safqa-core.ts';
@@ -15,6 +16,18 @@ describe('Retry-After parsing', () => {
   it('returns null when absent or invalid', () => {
     expect(parseRetryAfter(new Headers())).toBeNull();
     expect(parseRetryAfter(new Headers({ 'retry-after': 'soon' }))).toBeNull();
+  });
+});
+
+describe('graduated refusal cooldown', () => {
+  it('escalates 1h → 3h → 6h → 12h → 24h and caps there', () => {
+    const H = 3600_000;
+    expect(cooldownMs(1)).toBe(1 * H);
+    expect(cooldownMs(2)).toBe(3 * H);
+    expect(cooldownMs(3)).toBe(6 * H);
+    expect(cooldownMs(4)).toBe(12 * H);
+    expect(cooldownMs(5)).toBe(24 * H);
+    expect(cooldownMs(99)).toBe(24 * H);
   });
 });
 
