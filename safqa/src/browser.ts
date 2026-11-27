@@ -21,7 +21,9 @@ async function viaPlaywright(url: string): Promise<string | null> {
   if (!browser) return null;
   const page = await browser.newPage({ userAgent: UA });
   try {
-    await page.goto(url, { waitUntil: 'networkidle', timeout: 30_000 });
+    // E-commerce pages rarely reach networkidle (trackers/ads); domcontentloaded + a short settle is reliable.
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.waitForTimeout(3_000);
     return await page.content();
   } catch { return null; } finally { await page.close().catch(() => undefined); }
 }
