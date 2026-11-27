@@ -21,6 +21,8 @@ import { getBudget, getPlan, heal, report, Sink } from './sink.ts';
 import { loadState, saveState, SITEMAP_CACHE_MAX, type State } from './state.ts';
 import { checkItem } from './validate.ts';
 import { guarded, throttledHeal } from './resilience.ts';
+import { HealLlmBudget, HealLlmSession, healLlmMode, type HealLlmSummary } from './heal-llm.ts';
+import { parsePrice } from './text.ts';
 import { log as plog, storeLog } from './log.ts';
 import { STORES, type Store } from './stores.ts';
 
@@ -43,13 +45,15 @@ export function limitSitemapList(list: string[], maxFiles?: number): string[] {
 const H = 3600_000;
 const itemHash = (it: Item) => createHash('sha1').update([it.title, it.price, it.listPrice, it.inStock].join('|')).digest('hex').slice(0, 16);
 
-export interface StoreRun { store: string; status: string; candidates: number; queued: number; fetched: number; extracted: number; healed: number; unchanged: number; invalid?: number; anomalies?: number; sink?: Sink['stats']; groups?: number; ms: number; note?: string }
+export interface StoreRun { store: string; status: string; candidates: number; queued: number; fetched: number; extracted: number; healed: number; unchanged: number; invalid?: number; anomalies?: number; sink?: Sink['stats']; groups?: number; ms: number; note?: string; llmHeal?: HealLlmSummary }
 
-export async function huntStore(s: Store, st: State, o: { max?: number; dry: boolean; tight?: boolean }): Promise<StoreRun> {
+export async function huntStore(s: Store, st: State, o: { max?: number; dry: boolean; tight?: boolean; llmBudget?: HealLlmBudget }): Promise<StoreRun> {
   const t0 = Date.now();
   const run: StoreRun = { store: s.id, status: 'ok', candidates: 0, queued: 0, fetched: 0, extracted: 0, healed: 0, unchanged: 0, ms: 0 };
   const slog = storeLog(s.id);
-  const done = (status: string, note?: string) => { const r = { ...run, status, note, ms: Date.now() - t0 }; slog.info({ run: r }, 'store run finished'); return r; };
+  // LLM heal layer (off by default): per-store session, shared per-run call budget (≤30).
+  const llmSession = healLlmMode() !== 'off' ? new HealLlmSession(s.id, { budget: o.llmBudget }) : null;
+  const done = (status: string, note?: string) => { const r = { ...run, status, note, ms: Date.now() - t0, ...(llmSession ? { llmHeal: llmSession.summary() } : {}) }; slog.info({ run: r }, 'store run finished'); return r; };
   // Graduated escalation: a refusal is never final — re-test after 1 h, then 3/6/12/24 h if it repeats;
   // any successful fetch resets the ladder. Throttles (429/503) use the server's Retry-After when given.
   const noteRefusal = (ms?: number) => { const n = (st.refusals[s.id] ?? 0) + 1; st.refusals[s.id] = n; st.refusedUntil[s.id] = Date.now() + (ms ?? cooldownMs(n)); };
@@ -206,6 +210,20 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
       });
       if (it && !it.price && candidates.length && run.healed < HEAL_CAP) { const ai = await tryHeal(it.title); if (ai?.price && plausibleEgp(ai.price)) { it = { ...it, price: ai.price }; run.healed++; } }
       if (!it && candidates.length && pageTitle && run.healed < HEAL_CAP) { const ai = await tryHeal(pageTitle); if (ai?.price && plausibleEgp(ai.price)) { it = { url: request.url, title: pageTitle, brand: null, price: ai.price, listPrice: null, currency: 'EGP', inStock: true, image: null, gtin: null, mpn: null, crumbs: [] }; run.healed++; } }
+      // Sixth layer (LLM, off by default, shadow-first): only after every deterministic layer
+      // failed. The model proposes a selector; code reads + validates the price (5 checks).
+      // Shadow mode only records into health/logs; adoption needs proven selector + adopt flag.
+      if (llmSession && (!it || !it.price)) {
+        try {
+          const known = candidates.map((c) => parsePrice(c.text)).filter((p): p is number => p != null && plausibleEgp(p));
+          const r = await llmSession.tryHeal(html, request.url, known, it?.title ?? pageTitle ?? '');
+          if (r) {
+            if (it) it = { ...it, price: r.price };
+            else if (pageTitle) it = { url: request.url, title: pageTitle, brand: null, price: r.price, listPrice: null, currency: 'EGP', inStock: true, image: null, gtin: null, mpn: null, crumbs: [] };
+            if (it) run.healed++;
+          }
+        } catch { /* LLM heal must never break a hunt */ }
+      }
       if (it?.title && it.price) { if (!(await accept(it, validators))) await crawler.autoscaledPool?.abort(); }
       else { const p = seen[request.url]; seen[request.url] = { ...(p ?? { first: Date.now() }), last: Date.now(), fails: (p?.fails ?? 0) + 1 }; }
     },
@@ -237,8 +255,9 @@ export async function hunt(o: { stores?: string[]; max?: number; dry: boolean; m
   // Stores are different hosts, so they hunt in parallel: the per-host delay still applies to every host,
   // and the shared D1 write budget is enforced server-side per batch (each sink stops on its budget flag).
   const targets = STORES.filter((x) => (o.stores?.length ? o.stores.includes(x.id) : x.kind === 'sitemap'));
+  const llmBudget = new HealLlmBudget(); // one shared ≤30-call budget for the whole run
   const runs: StoreRun[] = await Promise.all(targets.map(async (s) => {
-    try { return await huntStore(s, st, { ...o, tight }); } catch (e) { return { store: s.id, status: 'error', note: String(e).slice(0, 200), candidates: 0, queued: 0, fetched: 0, extracted: 0, healed: 0, unchanged: 0, ms: 0 } as StoreRun; }
+    try { return await huntStore(s, st, { ...o, tight, llmBudget }); } catch (e) { return { store: s.id, status: 'error', note: String(e).slice(0, 200), candidates: 0, queued: 0, fetched: 0, extracted: 0, healed: 0, unchanged: 0, ms: 0 } as StoreRun; }
   }));
   await closeBrowser();
   await saveState(st);

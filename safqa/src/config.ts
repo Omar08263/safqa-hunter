@@ -25,6 +25,14 @@ export const TIGHT_ROOM = Math.floor(num(process.env.SAFQA_TIGHT_ROOM, MIN_ROOM 
 /** Max AI self-heal calls per store run. */
 export const HEAL_CAP = Math.floor(num(process.env.SAFQA_HEAL_CAP, 50));
 
+/** LLM heal layer (heal-llm.ts, OFF by default via SAFQA_HEAL_LLM): hard cap 30 model calls per
+ *  hunt run across all stores, per-call timeout, local GGUF model + llama.cpp binary paths.
+ *  Model and binary live in actions/cache — never in the repo. */
+export const HEAL_LLM_CAP = Math.min(30, Math.floor(num(process.env.SAFQA_HEAL_LLM_CAP, 30)));
+export const HEAL_LLM_TIMEOUT_MS = Math.floor(num(process.env.SAFQA_HEAL_LLM_TIMEOUT_MS, 30_000));
+export const HEAL_LLM_MODEL = process.env.SAFQA_HEAL_LLM_MODEL ?? 'models/qwen3-1.7b-q4_k_m.gguf';
+export const LLAMA_BIN = process.env.SAFQA_LLAMA_BIN ?? 'llama-cli';
+
 /** Hard caps for the robots.txt sitemap fallback (2026-11-27: a refused store whose robots.txt
  *  declares dozens of sitemaps streamed them all and stretched a full hunt to ~31 min). The
  *  fallback reads at most this many sitemap files and collects at most this many product URLs;

@@ -1,0 +1,54 @@
+name: safqa-heal-llm-bench
+# Manual-only bench for the LLM heal layer (heal-llm.ts): downloads Qwen3-1.7B Q4_K_M GGUF +
+# llama.cpp into actions/cache (never the repo), runs the proposer in SHADOW mode over
+# failure-page fixtures, and uploads the accuracy report. No API/D1 calls are made.
+on: workflow_dispatch
+permissions: { contents: read }
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: safqa } }
+    env:
+      SAFQA_HEAL_LLM: shadow
+      SAFQA_HEAL_LLM_MODEL: models/qwen3-1.7b-q4_k_m.gguf
+      SAFQA_LLAMA_BIN: /tmp/llama-bin/llama-cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, package-manager-cache: false }
+      - name: restore model + llama.cpp from cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            safqa/models
+            /tmp/llama-bin
+          key: heal-llm-qwen3-1.7b-q4km-v1
+      - name: download llama.cpp (ubuntu x64 release) if not cached
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          if [ ! -x /tmp/llama-bin/llama-cli ]; then
+            mkdir -p /tmp/llama-bin /tmp/llama-dl
+            gh release download --repo ggml-org/llama.cpp --pattern '*bin-ubuntu-x64*' --dir /tmp/llama-dl --clobber
+            cd /tmp/llama-dl && for f in *; do case "$f" in *.zip) unzip -oq "$f";; *.tar.gz) tar xzf "$f";; esac; done
+            find /tmp/llama-dl -name llama-cli -type f -exec cp {} /tmp/llama-bin/llama-cli \;
+            find /tmp/llama-dl -name '*.so*' -exec cp {} /tmp/llama-bin/ \; || true
+            chmod +x /tmp/llama-bin/llama-cli
+          fi
+          /tmp/llama-bin/llama-cli --version || true
+      - name: download Qwen3-1.7B Q4_K_M GGUF if not cached
+        run: |
+          mkdir -p models
+          if [ ! -s models/qwen3-1.7b-q4_k_m.gguf ]; then
+            curl -fL --retry 3 -o models/qwen3-1.7b-q4_k_m.gguf \
+              "https://huggingface.co/bartowski/Qwen_Qwen3-1.7B-GGUF/resolve/main/Qwen_Qwen3-1.7B-Q4_K_M.gguf" \
+            || curl -fL --retry 3 -o models/qwen3-1.7b-q4_k_m.gguf \
+              "https://huggingface.co/MaziyarPanahi/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B.Q4_K_M.gguf"
+          fi
+          ls -lh models/qwen3-1.7b-q4_k_m.gguf
+      - run: npm ci
+      - name: shadow bench over failure-page fixtures
+        run: npx tsx scripts/heal-llm-bench.ts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: heal-llm-bench
+          path: safqa/out/heal-llm-bench.json
