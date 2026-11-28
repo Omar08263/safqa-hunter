@@ -6,9 +6,9 @@ import type { Item } from '../src/extract/jsonld.ts';
 const item = (n: number): Item => ({ url: `https://x.example/p${n}`, title: `P${n}`, brand: null, price: 100 + n, listPrice: null, currency: 'EGP', inStock: true, image: null, gtin: null, mpn: null, crumbs: [] });
 
 describe('D1 write-budget discipline defaults', () => {
-  it('refresh window is 7 days, batch 25, minRoom 8000, heal cap 50', () => {
+  it('refresh window is 7 days, batch 6 (server MAX_BATCH contract), minRoom 8000, heal cap 50', () => {
     expect(UNCHANGED_WINDOW_MS).toBe(7 * 86400_000);
-    expect(BATCH_SIZE).toBe(25);
+    expect(BATCH_SIZE).toBe(6);
     expect(MIN_ROOM).toBe(8000);
     expect(HEAL_CAP).toBe(50);
     expect(TIGHT_ROOM).toBeGreaterThan(MIN_ROOM);

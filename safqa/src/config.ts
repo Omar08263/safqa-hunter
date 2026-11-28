@@ -28,8 +28,23 @@ export function unchangedWindowMs(env: NodeJS.ProcessEnv = process.env): number 
 }
 /** Re-send an unchanged item only after this window (refresh), measured from the last SEND, not last fetch. */
 export const UNCHANGED_WINDOW_MS = unchangedWindowMs();
-/** Items per POST /api/v5/hunter/batch. Fewer, larger batches = fewer requests for the same rows. */
-export const BATCH_SIZE = Math.floor(num(process.env.SAFQA_BATCH, 25));
+/**
+ * Items per POST /api/v5/hunter/batch. CONTRACT: the Worker hard-caps every batch at
+ * MAX_BATCH = 6 (apps/edge/src/catalog/hunter.ts in Omar08263/safqa) and silently drops the
+ * rest — it does not error. Anything above 6 sent by the hunter is lost AND wrongly marked
+ * "sent" locally (hunt.ts records sentAt after sink.add), so it would not be re-sent until
+ * the 7-day unchanged window expired. The client must therefore never exceed 6: the default
+ * is 6 and any SAFQA_BATCH override is clamped to [1, 6]. Pure function of env for testing.
+ */
+export const SERVER_MAX_BATCH = 6;
+export function batchSize(env: NodeJS.ProcessEnv = process.env): number {
+  const v = env.SAFQA_BATCH;
+  if (v === undefined || v === '') return SERVER_MAX_BATCH;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return SERVER_MAX_BATCH;
+  return Math.min(SERVER_MAX_BATCH, Math.max(1, Math.floor(n)));
+}
+export const BATCH_SIZE = batchSize();
 /** Refuse to start a real hunt unless at least this many background rows remain today. */
 export const MIN_ROOM = Math.floor(num(process.env.SAFQA_MIN_ROOM, 8000));
 /** Below this remaining room the budget is "tight": skip getPlan/report (each costs reads/writes). */
