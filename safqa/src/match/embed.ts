@@ -21,10 +21,21 @@ export function withPrefix(model: ModelId, text: string): string {
   return model === 'e5small' || model === 'e5arabic' ? `passage: ${text}` : text;
 }
 
+// Per-model ONNX load overrides. granite97's repo ships onnx/model.onnx +
+// onnx/model_quint8_avx2.onnx but NO model_quantized.onnx (verified via HF API
+// 2026-11-28), so the q8 default 404s; load the quint8 file by name instead
+// (dtype fp32 = empty suffix, the graph itself is quint8-quantised).
+// e5arabic has NO onnx export at all (safetensors only) — it will fail to load
+// here until an ONNX conversion exists; bench reports that honestly.
+const LOAD_OPTS: Partial<Record<ModelId, { dtype: 'fp32' | 'q8'; model_file_name?: string }>> = {
+  granite97: { dtype: 'fp32', model_file_name: 'model_quint8_avx2' },
+};
+
 export async function loadEmbedder(model: ModelId = 'minilm', cacheDir?: string): Promise<Embedder> {
   const { pipeline, env } = await import('@huggingface/transformers');
   if (cacheDir) env.cacheDir = cacheDir;
-  const extractor = await pipeline('feature-extraction', MODELS[model], { dtype: 'q8' });
+  const opts = LOAD_OPTS[model] ?? { dtype: 'q8' };
+  const extractor = await pipeline('feature-extraction', MODELS[model], opts);
   return async (texts: string[]) => {
     const out: Float32Array[] = [];
     const BATCH = 32;

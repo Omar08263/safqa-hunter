@@ -29,5 +29,7 @@ jobs:
       - run: npm ci
       - run: npx tsx scripts/bench-embed.ts ${{ inputs.models }}
       - run: npx tsx scripts/eval-pairs.ts granite97
+      - run: npx tsx scripts/eval-pairs.ts e5small
       - run: npx tsx scripts/bench-vec.ts 10000
       - run: npx tsx scripts/eval-classify.ts granite97
+      - run: npx tsx scripts/eval-classify.ts e5small
