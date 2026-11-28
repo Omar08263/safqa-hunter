@@ -1,0 +1,33 @@
+name: safqa-ai-bench
+# Manual only: measured embedding-model comparison + vec/classify benches.
+# Models live in actions/cache (never in the repo); nothing here runs on push.
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: 'Models to bench (space-separated)'
+        default: 'minilm granite97 e5small e5arabic'
+permissions: { contents: read }
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: safqa } }
+    env:
+      ONNXRUNTIME_NODE_INSTALL: skip
+      SAFQA_MODEL_CACHE: .model-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, package-manager-cache: false }
+      - uses: actions/cache@v4
+        with:
+          path: safqa/.model-cache
+          key: safqa-models-v1
+          restore-keys: safqa-models-
+      - uses: actions/cache@v4
+        with: { path: ~/.npm, key: 'npm-${{ hashFiles(''safqa/package-lock.json'') }}', restore-keys: 'npm-' }
+      - run: npm ci
+      - run: npx tsx scripts/bench-embed.ts ${{ inputs.models }}
+      - run: npx tsx scripts/eval-pairs.ts granite97
+      - run: npx tsx scripts/bench-vec.ts 10000
+      - run: npx tsx scripts/eval-classify.ts granite97
