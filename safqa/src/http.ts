@@ -2,6 +2,13 @@
 // Crawlee's default got-scraping client generates browser-like fingerprint headers; we deliberately do not use it.
 import { MIN_DELAY_MS, UA } from './config.ts';
 
+// NOTE (2026-11-28, measured): an explicit undici Agent dispatcher was tried for keep-alive
+// tuning and REJECTED with evidence — the standalone undici Agent ignores NODE_USE_ENV_PROXY,
+// so in proxied environments every fetch dies with an SSL "wrong version number" error, while
+// Node's built-in dispatcher honours the env proxy and already pools keep-alive connections
+// (default keepAliveTimeout 4s > our 2.5s politeness gap, so sequential requests already reuse
+// one TLS connection). Built-in fetch stays.
+
 const lastHit = new Map<string, number>();
 const delays = new Map<string, number>();
 const chains = new Map<string, Promise<unknown>>();
