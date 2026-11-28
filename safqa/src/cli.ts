@@ -44,7 +44,7 @@ async function probe(input: string) {
 
 if (cmd === 'hunt') {
   if (!args.includes('--dry') && !TOKEN) { console.error('SAFQA_HUNTER_TOKEN is not set: refusing a real hunt whose every batch would fail auth. Set the secret, or run with --dry.'); process.exit(2); }
-  const r = await hunt({ stores: opt('stores')?.split(',').filter(Boolean), max: Number(opt('max')) || undefined, dry: args.includes('--dry') });
+  const r = await hunt({ stores: opt('stores')?.split(',').filter(Boolean), kinds: opt('kinds')?.split(',').filter(Boolean), max: Number(opt('max')) || undefined, dry: args.includes('--dry') });
   console.log(JSON.stringify((r as { totals?: unknown }).totals ?? r));
 } else if (cmd === 'probe' && args[1]) await probe(args[1]);
 else if (cmd === 'budget') console.log(JSON.stringify(await getBudget(), null, 2));
@@ -56,4 +56,4 @@ else if (cmd === 'match') {
   const r = await runMatch({ dir, embed, vecPath: `${dir}/vecindex.db` });
   console.log(JSON.stringify({ products: r.products, keptPairs: r.pairs.length, clusters: r.clusters.length, vecIndexed: r.vecIndexed, stats: r.stats }));
 }
-else console.log('usage: hunt [--stores a,b] [--max N] [--dry] | probe <url> | budget | match [--model id] [--embedder fake] [--in out]');
+else console.log('usage: hunt [--stores a,b] [--kinds shopify,woocommerce] [--max N] [--dry] | probe <url> | budget | match [--model id] [--embedder fake] [--in out]');

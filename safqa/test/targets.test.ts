@@ -19,4 +19,15 @@ describe('selectTargets', () => {
   it('empty list behaves like default', () => {
     expect(selectTargets([]).length).toBe(STORES.length);
   });
+
+  it('kinds filter selects only feed stores (fast continuous cadence)', () => {
+    const feeds = selectTargets(undefined, ['shopify', 'woocommerce']);
+    expect(feeds.length).toBeGreaterThan(10);
+    expect(feeds.every((s) => s.kind === 'shopify' || s.kind === 'woocommerce')).toBe(true);
+  });
+
+  it('explicit stores win over kinds', () => {
+    const picked = selectTargets(['btech'], ['shopify']);
+    expect(picked.map((s) => s.id)).toEqual(['btech']);
+  });
 });

@@ -1,0 +1,77 @@
+# Fast continuous feed cadence: Shopify/WooCommerce public catalogues only, every 2 hours.
+# Feeds are the stores' own public data — a handful of polite requests returns thousands of
+# products in minutes. The hunt is delta-only (unchanged items cost no D1 writes for 7 days),
+# asks the API for the write budget first, and stops on any refusal/throttle. Same concurrency
+# group as the full hunt so state saves never race. The daily full hunt (safqa-hunt.yml) is
+# unchanged — this is added on top, nothing is reduced.
+name: safqa-feed-hunt
+on:
+  schedule:
+    - cron: '15 */2 * * *'   # every 2 hours at :15 UTC
+  workflow_dispatch:
+    inputs:
+      dry: { description: 'dry run (no writes; output as artifact)', type: boolean, default: false }
+concurrency: { group: safqa-hunt, cancel-in-progress: false }
+permissions: { contents: read }
+jobs:
+  feed-hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults: { run: { working-directory: safqa } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, package-manager-cache: false }
+      - run: mkdir -p ~/.cache/ms-playwright models
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ~/.cache/ms-playwright
+            safqa/models
+          key: 'safqa-deps-${{ hashFiles(''safqa/package-lock.json'') }}'
+          restore-keys: 'safqa-deps-'
+      - run: npm ci
+      - uses: actions/cache/restore@v4
+        with: { path: safqa/state, key: 'safqa-state-${{ github.run_id }}', restore-keys: 'safqa-state-' }
+      - name: feed hunt (shopify + woocommerce only)
+        env:
+          SAFQA_HUNTER_TOKEN: ${{ secrets.SAFQA_HUNTER_TOKEN }}
+          DRY: ${{ inputs.dry }}
+        run: |
+          set -o pipefail
+          mkdir -p out
+          ARGS="--kinds shopify,woocommerce"
+          [ "$DRY" = "true" ] && ARGS="$ARGS --dry"
+          npx tsx src/cli.ts hunt $ARGS 2>&1 | tee out/hunt.log
+      - uses: actions/cache/save@v4
+        if: always()
+        with: { path: safqa/state, key: 'safqa-state-${{ github.run_id }}' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 'feed-hunt-${{ github.run_id }}'
+          path: |
+            safqa/out/health.json
+            safqa/out/*.jsonl
+            safqa/out/hunt.log
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Healthchecks.io ping (on success)
+        if: success() && env.HC_PING_URL != ''
+        env:
+          HC_PING_URL: ${{ secrets.HEALTHCHECKS_PING_URL }}
+        run: curl -fsS -m 10 --retry 3 "$HC_PING_URL" || true
+      - name: ntfy failure alert
+        if: failure() && env.NTFY_TOPIC != ''
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_SERVER: ${{ vars.NTFY_SERVER }}
+        run: |
+          SERVER="${NTFY_SERVER:-https://ntfy.sh}"
+          curl -fsS -m 10 --retry 2 \
+            -H "Title: Safqa feed hunt FAILED" \
+            -H "Priority: high" \
+            -H "Tags: warning" \
+            -d "safqa-feed-hunt run failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            "$SERVER/$NTFY_TOPIC" || true
