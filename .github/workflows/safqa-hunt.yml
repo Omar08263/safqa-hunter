@@ -8,6 +8,7 @@ on:
     inputs:
       stores: { description: 'comma-separated store ids (default: all stores, every kind)', required: false, default: '' }
       max: { description: 'max pages per store (default: per-store)', required: false, default: '' }
+      unchanged_days: { description: 'unchanged-refresh window in days; 0 = force re-send (e.g. after server store registration); empty = default 7', required: false, default: '' }
       dry: { description: 'dry run (no writes; output as artifact)', type: boolean, default: false }
       analytics: { description: 'DuckDB price-history report from out/*.jsonl (artifact only, no D1 writes)', type: boolean, default: false }
       match: { description: 'after hunt: cross-store matching over out/*.jsonl (needs dry output; artifact only)', type: boolean, default: false }
@@ -79,6 +80,7 @@ jobs:
           MAX: ${{ inputs.max }}
           DRY: ${{ inputs.dry }}
           SAFQA_HEAL_LLM: shadow
+          SAFQA_UNCHANGED_DAYS: ${{ inputs.unchanged_days }}
           SAFQA_HEAL_LLM_MODEL: models/qwen3-1.7b-q4_k_m.gguf
           SAFQA_LLAMA_BIN: /tmp/llama-bin/llama-cli
         run: |

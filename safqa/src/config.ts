@@ -14,8 +14,20 @@ export const TOKEN = process.env.SAFQA_HUNTER_TOKEN ?? '';
 // D1 write-budget discipline (2026-11-27: the daily budget was exhausted mid-day). All tunable by env,
 // defaults chosen to cut hunter writes hard without losing price freshness that matters.
 const num = (v: string | undefined, d: number) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : d; };
+/**
+ * Unchanged-refresh window in ms. Default 7 days. SAFQA_UNCHANGED_DAYS=0 is an explicit
+ * operator override meaning "force re-send everything" (used after server-side store
+ * registration so previously-rejected items are delivered immediately instead of waiting
+ * out the window). Unset/empty/invalid/negative all fall back to the 7-day default.
+ */
+export function unchangedWindowMs(env: NodeJS.ProcessEnv = process.env): number {
+  const v = env.SAFQA_UNCHANGED_DAYS;
+  if (v === undefined || v === '') return 7 * 86400_000;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n * 86400_000 : 7 * 86400_000;
+}
 /** Re-send an unchanged item only after this window (refresh), measured from the last SEND, not last fetch. */
-export const UNCHANGED_WINDOW_MS = num(process.env.SAFQA_UNCHANGED_DAYS, 7) * 86400_000;
+export const UNCHANGED_WINDOW_MS = unchangedWindowMs();
 /** Items per POST /api/v5/hunter/batch. Fewer, larger batches = fewer requests for the same rows. */
 export const BATCH_SIZE = Math.floor(num(process.env.SAFQA_BATCH, 25));
 /** Refuse to start a real hunt unless at least this many background rows remain today. */
