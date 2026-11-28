@@ -243,6 +243,15 @@ export async function huntStore(s: Store, st: State, o: { max?: number; dry: boo
   return done(refused ? 'refused' : sink.stats.budgetStop ? 'budget' : 'ok', refused || undefined);
 }
 
+/** Default hunt = EVERY store kind. Feed stores (Shopify/WooCommerce public catalogues) are the
+ *  fastest legitimate channel — thousands of products per minute in a handful of polite requests —
+ *  so excluding them from the default run (the old sitemap-only default) starved the catalogue.
+ *  Disabled stores and refusal cooldowns still short-circuit inside huntStore; the D1 write budget
+ *  still gates every batch. An explicit --stores list still narrows the run. */
+export function selectTargets(stores?: string[]) {
+  return STORES.filter((x) => (stores?.length ? stores.includes(x.id) : true));
+}
+
 export async function hunt(o: { stores?: string[]; max?: number; dry: boolean; minRoom?: number }) {
   const st = loadState();
   const budget = o.dry ? null : await getBudget();
@@ -254,7 +263,7 @@ export async function hunt(o: { stores?: string[]; max?: number; dry: boolean; m
   }
   // Stores are different hosts, so they hunt in parallel: the per-host delay still applies to every host,
   // and the shared D1 write budget is enforced server-side per batch (each sink stops on its budget flag).
-  const targets = STORES.filter((x) => (o.stores?.length ? o.stores.includes(x.id) : x.kind === 'sitemap'));
+  const targets = selectTargets(o.stores);
   const llmBudget = new HealLlmBudget(); // one shared ≤30-call budget for the whole run
   const runs: StoreRun[] = await Promise.all(targets.map(async (s) => {
     try { return await huntStore(s, st, { ...o, tight, llmBudget }); } catch (e) { return { store: s.id, status: 'error', note: String(e).slice(0, 200), candidates: 0, queued: 0, fetched: 0, extracted: 0, healed: 0, unchanged: 0, ms: 0 } as StoreRun; }

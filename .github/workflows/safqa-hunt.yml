@@ -6,7 +6,7 @@ on:
     - cron: '40 0 * * *'   # 02:40 Cairo
   workflow_dispatch:
     inputs:
-      stores: { description: 'comma-separated store ids (default: all sitemap stores)', required: false, default: '' }
+      stores: { description: 'comma-separated store ids (default: all stores, every kind)', required: false, default: '' }
       max: { description: 'max pages per store (default: per-store)', required: false, default: '' }
       dry: { description: 'dry run (no writes; output as artifact)', type: boolean, default: false }
       analytics: { description: 'DuckDB price-history report from out/*.jsonl (artifact only, no D1 writes)', type: boolean, default: false }
