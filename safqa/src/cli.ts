@@ -3,6 +3,7 @@
 //   tsx src/cli.ts hunt [--stores btech,2b] [--max 500] [--dry]
 //   tsx src/cli.ts probe https://store.example     store-adapter generator (robots, feeds, sitemap, JSON-LD)
 //   tsx src/cli.ts budget                           today's D1 write budget as the Safqa API sees it
+//   tsx src/cli.ts match [--model id] [--embedder fake] [--in out]   cross-store matching over hunt JSONL
 import { STOP_STATUSES, TOKEN, UA } from './config.ts';
 import { streamSitemap } from './adapters/sitemap.ts';
 import { extract } from './extract/jsonld.ts';
@@ -10,6 +11,8 @@ import { politeFetch } from './http.ts';
 import { hunt } from './hunt.ts';
 import { loadRobots } from './robots.ts';
 import { getBudget } from './sink.ts';
+import { fakeEmbedder, runMatch } from './match/run-match.ts';
+import { loadEmbedder, type ModelId } from './match/embed.ts';
 
 const args = process.argv.slice(2);
 const opt = (n: string) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : undefined; };
@@ -45,4 +48,12 @@ if (cmd === 'hunt') {
   console.log(JSON.stringify((r as { totals?: unknown }).totals ?? r));
 } else if (cmd === 'probe' && args[1]) await probe(args[1]);
 else if (cmd === 'budget') console.log(JSON.stringify(await getBudget(), null, 2));
-else console.log('usage: hunt [--stores a,b] [--max N] [--dry] | probe <url> | budget');
+else if (cmd === 'match') {
+  const dir = opt('in') ?? 'out';
+  const embed = opt('embedder') === 'fake'
+    ? fakeEmbedder
+    : await loadEmbedder((opt('model') as ModelId | undefined) ?? undefined, process.env.SAFQA_MODEL_CACHE ?? '.model-cache');
+  const r = await runMatch({ dir, embed, vecPath: `${dir}/vecindex.db` });
+  console.log(JSON.stringify({ products: r.products, keptPairs: r.pairs.length, clusters: r.clusters.length, vecIndexed: r.vecIndexed, stats: r.stats }));
+}
+else console.log('usage: hunt [--stores a,b] [--max N] [--dry] | probe <url> | budget | match [--model id] [--embedder fake] [--in out]');
