@@ -31,7 +31,10 @@ const LOAD_OPTS: Partial<Record<ModelId, { dtype: 'fp32' | 'q8'; model_file_name
   granite97: { dtype: 'fp32', model_file_name: 'model_quint8_avx2' },
 };
 
-export async function loadEmbedder(model: ModelId = 'minilm', cacheDir?: string): Promise<Embedder> {
+// Default = measured winner of safqa-ai-bench run 46093281502 (2026-11-28, 698 labeled pairs):
+// e5small acc 0.850 / matcher recall 0.787 @ precision 1.000, vs granite97 0.798/0.731, minilm 0.788.
+// e5arabic rejected: its repo ships safetensors only, no ONNX export (verified via HF API).
+export async function loadEmbedder(model: ModelId = 'e5small', cacheDir?: string): Promise<Embedder> {
   const { pipeline, env } = await import('@huggingface/transformers');
   if (cacheDir) env.cacheDir = cacheDir;
   const opts = LOAD_OPTS[model] ?? { dtype: 'q8' };

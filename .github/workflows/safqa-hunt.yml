@@ -10,6 +10,7 @@ on:
       max: { description: 'max pages per store (default: per-store)', required: false, default: '' }
       dry: { description: 'dry run (no writes; output as artifact)', type: boolean, default: false }
       analytics: { description: 'DuckDB price-history report from out/*.jsonl (artifact only, no D1 writes)', type: boolean, default: false }
+      match: { description: 'after hunt: cross-store matching over out/*.jsonl (needs dry output; artifact only)', type: boolean, default: false }
 concurrency: { group: safqa-hunt, cancel-in-progress: false }
 permissions: { contents: read }
 jobs:
@@ -36,12 +37,50 @@ jobs:
       - run: npm ci
       - uses: actions/cache/restore@v4
         with: { path: safqa/state, key: 'safqa-state-${{ github.run_id }}', restore-keys: 'safqa-state-' }
+      # LLM heal layer (shadow: propose+validate+log only, never adopts, never writes prices).
+      # Model + llama.cpp live in actions/cache (shared with safqa-heal-llm-bench, proven 6/6).
+      # Restore-only here; downloads are best-effort — a missing binary only disables the layer.
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            safqa/models
+            /tmp/llama-bin
+          key: heal-llm-qwen3-1.7b-q4km-v1
+          restore-keys: heal-llm-
+      - uses: actions/cache/restore@v4
+        with: { path: safqa/.model-cache, key: safqa-models-v1, restore-keys: safqa-models- }
+      - name: download llama.cpp if not cached (best-effort)
+        continue-on-error: true
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          if [ ! -x /tmp/llama-bin/llama-cli ]; then
+            mkdir -p /tmp/llama-bin /tmp/llama-dl
+            TAG=$(gh release list --repo ggml-org/llama.cpp --limit 1 --json tagName --jq '.[0].tagName')
+            gh release download "$TAG" --repo ggml-org/llama.cpp --pattern "llama-${TAG}-bin-ubuntu-x64.tar.gz" --dir /tmp/llama-dl --clobber
+            cd /tmp/llama-dl && for f in *; do case "$f" in *.zip) unzip -oq "$f";; *.tar.gz) tar xzf "$f";; esac; done
+            find /tmp/llama-dl -name llama-cli -type f -exec cp {} /tmp/llama-bin/llama-cli \;
+            find /tmp/llama-dl -name '*.so*' -exec cp {} /tmp/llama-bin/ \; || true
+            chmod +x /tmp/llama-bin/llama-cli
+          fi
+      - name: download Qwen3-1.7B Q4_K_M GGUF if not cached (best-effort)
+        continue-on-error: true
+        run: |
+          mkdir -p models
+          if [ ! -s models/qwen3-1.7b-q4_k_m.gguf ]; then
+            curl -fL --retry 3 -o models/qwen3-1.7b-q4_k_m.gguf \
+              "https://huggingface.co/bartowski/Qwen_Qwen3-1.7B-GGUF/resolve/main/Qwen_Qwen3-1.7B-Q4_K_M.gguf" \
+            || curl -fL --retry 3 -o models/qwen3-1.7b-q4_k_m.gguf \
+              "https://huggingface.co/MaziyarPanahi/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B.Q4_K_M.gguf"
+          fi
       - name: hunt
         env:
           SAFQA_HUNTER_TOKEN: ${{ secrets.SAFQA_HUNTER_TOKEN }}
           STORES: ${{ inputs.stores }}
           MAX: ${{ inputs.max }}
           DRY: ${{ inputs.dry }}
+          SAFQA_HEAL_LLM: shadow
+          SAFQA_HEAL_LLM_MODEL: models/qwen3-1.7b-q4_k_m.gguf
+          SAFQA_LLAMA_BIN: /tmp/llama-bin/llama-cli
         run: |
           set -o pipefail
           mkdir -p out
@@ -76,6 +115,12 @@ jobs:
           open('out/analytics-report.md', 'w').write('\n'.join(lines) + '\n')
           print('\n'.join(lines))
           PY
+      # Optional, dispatch-only: cross-store matching over this run's dry JSONL (winner model
+      # e5small by default; see scripts/bench-embed.ts results). Artifact only, no D1 writes.
+      - name: cross-store match (dispatch only)
+        if: always() && inputs.match == true
+        env: { SAFQA_MODEL_CACHE: .model-cache }
+        run: npx tsx src/cli.ts match --in out
       - uses: actions/cache/save@v4
         if: always()
         with: { path: safqa/state, key: 'safqa-state-${{ github.run_id }}' }
@@ -90,6 +135,7 @@ jobs:
             safqa/out/*.jsonl
             safqa/out/hunt.log
             safqa/out/analytics-report.md
+            safqa/out/clusters.json
           retention-days: 7
           if-no-files-found: ignore
       # Dead-man switch: ping Healthchecks.io on success; silence there = alert.
